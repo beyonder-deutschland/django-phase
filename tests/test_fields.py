@@ -180,14 +180,13 @@ class PhaseFieldTransitionTest(TestCase):
         self.assertEqual(order.updated_at, NOW)
         self.assertEqual(Order.objects.get(pk=order.pk).updated_at, NOW)
 
-    def test_move_prefers_given_value_over_auto_now(self):
+    def test_auto_now_wins_over_given_value_as_in_save(self):
         order = Order.objects.create()
-        given = NOW - datetime.timedelta(days=1)
 
         with mock.patch("django.utils.timezone.now", return_value=NOW):
-            self.field.move(obj=order, to=Order.Status.PAID, updated_at=given)
+            self.field.move(obj=order, to=Order.Status.PAID, updated_at=NOW - datetime.timedelta(days=1))
 
-        self.assertEqual(order.updated_at, given)
+        self.assertEqual(order.updated_at, NOW)
 
     def test_refused_move_leaves_auto_now_fields_untouched(self):
         order = Order.objects.create()

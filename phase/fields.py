@@ -1,7 +1,7 @@
-import copy
 from collections.abc import Mapping
 
-from django.db import models
+from django.db import models, router
+from django.db.models import signals
 from django.db.models.query_utils import DeferredAttribute
 
 from phase.exceptions import (
@@ -87,20 +87,37 @@ class PhaseField(models.CharField):
         """
         Move `obj` to phase `to` and write `fields` and the model's `auto_now` fields in the same UPDATE.
 
+        Towards signals this behaves like `obj.save(update_fields=[<phase>, *fields, *<auto_now fields>])`: `pre_save`
+        sees the new values on `obj` and may change those fields, `post_save` follows a successful UPDATE.
+
         On success `obj` is refreshed, so field values given as expressions are read back as stored values. On failure
         `obj` stays as it was: its phase no longer matches the database, so a later `save()` is refused as stale
         instead of overwriting what the winner of a race wrote.
-
-        Like `QuerySet.update()`, this sends no `pre_save`/`post_save` signals and doesn't call `save()`.
         """
         source = getattr(obj, self.attname)
         if not self.can_transition(obj=obj, to=to):
             raise IllegalPhaseTransitionError(model_name=obj._meta.label, pk=obj.pk, source=source, target=to)
 
-        rows = type(obj)._base_manager.db_manager(obj._state.db).filter(pk=obj.pk)
-        auto_now_values = self._auto_now_values(obj=obj, fields=fields)
-        updated_rows = rows.filter(**{self.attname: source}).update(**{self.attname: to}, **auto_now_values, **fields)
+        model = type(obj)
+        using = obj._state.db or router.db_for_write(model, instance=obj)
+        rows = model._base_manager.using(using).filter(pk=obj.pk)
+        written_fields = self._written_fields(obj=obj, fields=fields)
+        update_fields = frozenset(field.name for field in written_fields)
+
+        loaded_state = (dict(obj.__dict__), dict(obj._state.fields_cache))
+        try:
+            obj.__dict__[self.attname] = to
+            for name, value in fields.items():
+                setattr(obj, name, value)
+            signals.pre_save.send(sender=model, instance=obj, raw=False, using=using, update_fields=update_fields)
+            # Like `save()`: values are read after `pre_save`, and `Field.pre_save()` stamps the `auto_now` fields.
+            values = {field.attname: field.pre_save(obj, add=False) for field in written_fields}
+            updated_rows = rows.filter(**{self.attname: source}).update(**values)
+        except BaseException:
+            self._restore(obj=obj, loaded_state=loaded_state)
+            raise
         if not updated_rows:
+            self._restore(obj=obj, loaded_state=loaded_state)
             raise IllegalPhaseTransitionError(
                 model_name=obj._meta.label,
                 pk=obj.pk,
@@ -108,18 +125,27 @@ class PhaseField(models.CharField):
                 target=to,
             )
 
-        obj.refresh_from_db(fields=[self.attname, *auto_now_values, *fields])
+        obj.refresh_from_db(fields=[field.attname for field in written_fields])
+        signals.post_save.send(
+            sender=model, instance=obj, created=False, update_fields=update_fields, raw=False, using=using
+        )
+
+    def _written_fields(self, *, obj: models.Model, fields: Mapping[str, object]) -> list[models.Field]:
+        """The phase, `fields` and the `auto_now` fields not among them, as `save(update_fields=…)` would write them."""
+        written_fields = [self, *(obj._meta.get_field(name) for name in fields)]
+        written_fields += [
+            field
+            for field in obj._meta.concrete_fields
+            if getattr(field, "auto_now", False) and field not in written_fields
+        ]
+        return written_fields
 
     @staticmethod
-    def _auto_now_values(*, obj: models.Model, fields: Mapping[str, object]) -> dict[str, object]:
-        # `pre_save()` computes the value as `save()` would, but also assigns it; a copy keeps `obj` untouched until the
-        # UPDATE succeeded.
-        stamped = copy.copy(obj)
-        return {
-            field.attname: field.pre_save(stamped, add=False)
-            for field in obj._meta.concrete_fields
-            if getattr(field, "auto_now", False) and field.name not in fields and field.attname not in fields
-        }
+    def _restore(*, obj: models.Model, loaded_state: tuple[dict, dict]) -> None:
+        instance_dict, fields_cache = loaded_state
+        obj.__dict__.clear()
+        obj.__dict__.update(instance_dict)
+        obj._state.fields_cache = fields_cache
 
 
 def get_phase_fields(*, model: type[models.Model]) -> tuple[PhaseField, ...]:

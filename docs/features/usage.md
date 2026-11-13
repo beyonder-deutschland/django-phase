@@ -55,14 +55,17 @@ move(obj=order, to=Order.Status.PAID, paid_at=timezone.now())
 * `move(obj=…, to=…, **fields)` checks the table and writes the phase and `fields` in **one** conditional `UPDATE`
   (`filter(pk=…, <field>=<source>).update(…)`). If no row changes, a concurrent request won the race and
   `IllegalPhaseTransitionError` is raised, exactly as for a transition missing from the table.
-* The same `UPDATE` also stamps the model's `auto_now` fields, unless `fields` sets them.
+* The same `UPDATE` also stamps the model's `auto_now` fields. As with `save()`, they always get the current time.
 * On success the instance is refreshed from the database, so `fields` given as expressions (`F("count") + 1`) are read
   back as stored values.
 * On failure the instance stays as it was. Its phase no longer matches the database, so a later `save()` is refused
   with `StalePhaseError` instead of overwriting what the winner of the race wrote. Reload it to go on. The exception's
   `source` is the phase in the database, or `None` if the row doesn't exist (anymore).
-* `move()` writes like `QuerySet.update()`: it sends no `pre_save`/`post_save` signals and doesn't call the model's
-  `save()`. React to a phase change in the action that calls `move()`, see below.
+* **Signals** are sent as for `obj.save(update_fields=[<phase>, *fields, *<auto_now fields>])`: `pre_save` sees the new
+  values on the instance and may still change the written fields (not the phase), `post_save` with `created=False`
+  follows a successful `UPDATE` and sees the stored values. A refused transition sends no `post_save`; one that loses a
+  race has already sent `pre_save`, as `save()` does when the write fails.
+* The model's own `save()` isn't called.
 * The row is addressed through the model's base manager on the instance's database, so a filtering default manager
   doesn't hide it.
 * `can_transition(obj=…, to=…)` and `targets(obj=…)` answer read-only questions. They only know the table, not further
