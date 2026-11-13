@@ -1,3 +1,7 @@
+import warnings
+from unittest import skipIf
+
+import django
 from django.test import TestCase
 
 from phase.exceptions import StalePhaseError
@@ -59,6 +63,17 @@ class PhaseGuardMixinSaveTest(TestCase):
         for empty_update_fields in ([], (), set()):
             with self.subTest(update_fields=empty_update_fields):
                 order.save(update_fields=empty_update_fields)
+
+        self.assertEqual(Order.objects.get(pk=order.pk).status, Order.Status.CANCELLED)
+
+    @skipIf(django.VERSION >= (6, 0), "Django 6.0 accepts the arguments of save() by keyword only.")
+    def test_positional_arguments_are_read_like_keywords(self):
+        order = Order.objects.create()
+        move(obj=Order.objects.get(pk=order.pk), to=Order.Status.CANCELLED)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            order.save(False, False, "default", [])
 
         self.assertEqual(Order.objects.get(pk=order.pk).status, Order.Status.CANCELLED)
 

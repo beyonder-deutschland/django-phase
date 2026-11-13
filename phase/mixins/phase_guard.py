@@ -3,6 +3,9 @@ from django.db import models, router, transaction
 from phase.exceptions import StalePhaseError
 from phase.fields import REFRESHING_FLAG, PhaseField, get_phase_fields, is_expression
 
+# The arguments of `Model.save()` in positional order.
+SAVE_ARGUMENTS = ("force_insert", "force_update", "using", "update_fields")
+
 
 class PhaseGuardMixin(models.Model):
     """
@@ -28,14 +31,16 @@ class PhaseGuardMixin(models.Model):
             for field in self.phase_fields()
             if field.attname in self.__dict__ and not is_expression(self.__dict__[field.attname])
         }
-        update_fields = kwargs.get("update_fields")
+        # Django 5.2 accepts the arguments of `save()` positionally as well.
+        options = dict(zip(SAVE_ARGUMENTS, args, strict=False)) | kwargs
+        update_fields = options.get("update_fields")
         is_skipped_by_django = update_fields is not None and not update_fields
         # Nothing to compare, an INSERT anyway, or a save Django skips (empty `update_fields`).
-        if not loaded_phases or self.pk is None or kwargs.get("force_insert") or is_skipped_by_django:
+        if not loaded_phases or self.pk is None or options.get("force_insert") or is_skipped_by_django:
             super().save(*args, **kwargs)
             return
 
-        using = kwargs.get("using") or router.db_for_write(type(self), instance=self)
+        using = options.get("using") or router.db_for_write(type(self), instance=self)
         with transaction.atomic(using=using):
             stored_phases = (
                 type(self)._base_manager.using(using).select_for_update().filter(pk=self.pk).values(*loaded_phases)

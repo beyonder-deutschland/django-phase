@@ -98,13 +98,19 @@ class PhaseField(models.CharField):
         `obj` stays as it was: its phase no longer matches the database, so a later `save()` is refused as stale
         instead of overwriting what the winner of a race wrote.
         """
-        source = getattr(obj, self.attname)
-        if not self.can_transition(obj=obj, to=to):
-            raise IllegalPhaseTransitionError(model_name=obj._meta.label, pk=obj.pk, source=source, target=to)
-
         model = type(obj)
         using = router.db_for_write(model, instance=obj)
         rows = model._base_manager.using(using).filter(pk=obj.pk)
+
+        source = getattr(obj, self.attname)
+        if is_expression(source):
+            # On Django 5.2 a backend without INSERT … RETURNING leaves the `db_default` placeholder on the instance.
+            source = rows.values_list(self.attname, flat=True).first()
+            if source is not None:
+                obj.__dict__[self.attname] = source
+        if to not in self.transitions.get(source, ()):
+            raise IllegalPhaseTransitionError(model_name=obj._meta.label, pk=obj.pk, source=source, target=to)
+
         written_fields = self._written_fields(obj=obj, fields=fields)
         update_fields = frozenset(field.name for field in written_fields)
 
