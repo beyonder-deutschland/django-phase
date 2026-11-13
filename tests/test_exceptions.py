@@ -34,6 +34,11 @@ class IllegalPhaseTransitionErrorTest(SimpleTestCase):
 
         self.assertEqual(str(error), "shop.Order ID #7 cannot change from 'Open' (1) to 'Shipped' (3).")
 
+    def test_message_without_pk(self):
+        error = IllegalPhaseTransitionError(model_name="shop.Order", pk=None, source="open", target="shipped")
+
+        self.assertEqual(str(error), "shop.Order cannot change from 'open' to 'shipped'.")
+
     def test_message_of_missing_row_with_label(self):
         error = IllegalPhaseTransitionError(
             model_name="shop.Order", pk=7, source=None, target=3, target_label="Shipped"

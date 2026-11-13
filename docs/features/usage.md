@@ -3,7 +3,8 @@
 ## The field
 
 A model whose status may only change along fixed transitions declares it as a `PhaseField`. The field owns the
-transition table; `phase.transitions.move()` is the one way of changing it.
+transition table; `phase.transitions.move()` and, for a whole queryset, `move_many()` are the only ways of
+changing it.
 
 ```python
 from django.db import models
@@ -34,7 +35,8 @@ class Order(PhaseGuardMixin, models.Model):
   `(Status.SHIPPED,)`. The field rejects anything else with `InvalidTransitionTableError`, because `(Status.SHIPPED)`
   is a plain string and `in` would match substrings.
 * **Direct assignment raises** `ProtectedPhaseFieldError`. The value is set once when the instance is built or loaded;
-  after that only `move()` changes it. Factories keep working, because they pass the phase to the constructor.
+  after that only `move()` and `move_many()` change it. Factories keep working, because they pass the phase to the
+  constructor.
 * **Never editable.** Admin and model forms leave the field out; passing `editable=True` raises
   `EditablePhaseFieldError`. List it in an admin's `readonly_fields` to show it on the detail page.
 * Migrations see a plain `CharField`, so no migration depends on `phase`. Changing the transition table needs no
@@ -114,6 +116,42 @@ move(obj=order, to=Order.Status.PAID, paid_at=timezone.now())
 * `can_transition(obj=…, to=…)` and `targets(obj=…)` answer read-only questions. They only know the table, not further
   conditions your code checks.
 
+## Moving many rows
+
+A straight bulk change without logic per row — a nightly job closing all expired orders, an admin action on a
+selection — uses `move_many()`:
+
+```python
+from django.utils import timezone
+
+from phase.transitions import move_many
+
+now = timezone.now()
+moved = move_many(
+    queryset=Order.objects.filter(expires_at__lt=now),
+    source=Order.Status.OPEN,
+    to=Order.Status.CANCELLED,
+    cancelled_at=now,
+)
+```
+
+* `move_many(queryset=…, source=…, to=…, **fields)` checks `source → to` against the table and raises
+  `IllegalPhaseTransitionError` before touching the database. The exception's `pk` is `None`.
+* It writes with **one** conditional `UPDATE` (`queryset.filter(<field>=<source>).update(…)`), which also writes
+  `fields` and stamps the model's `auto_now` fields. Passing the phase field among `fields` raises
+  `ProtectedPhaseFieldError`.
+* **Returns the number of rows moved.** Rows of the queryset that aren't in `source` — because they never were or
+  because someone moved them in the meantime — are skipped, not an error. Compare the count if it matters.
+* It is race-safe for the same reason as `move()`: the condition on the source phase is part of the `UPDATE`.
+* **One source per call.** The caller names the transition it means; moving rows from several phases to one target is
+  one call per source.
+* **No signals.** Like `QuerySet.update()`, it sends no `pre_save` or `post_save`, and the model's `save()` isn't
+  called. Logic in receivers doesn't run. Where it must, or where each row needs its own logic (calls to other
+  systems, failures isolated per row), loop over the rows and call `move()` for each.
+* **Instances in memory aren't updated.** An instance of a moved row keeps its old phase; a later `save()` on it is
+  refused with `StalePhaseError`. Reload it to go on.
+* The rows are written on the queryset's database, through whatever manager built the queryset.
+
 ## The mixin
 
 Every model with a phase field inherits `PhaseGuardMixin` (system check `phase.E001`), listed before `models.Model`:
@@ -140,8 +178,8 @@ primary key, `force_insert=True`) and a save with empty `update_fields` cost not
 
 ## Limits
 
-* `QuerySet.update()` and `bulk_update()` bypass both the field and the mixin. Data migrations and bulk writes have to
-  respect the table by hand.
+* `QuerySet.update()` and `bulk_update()` bypass both the field and the mixin. Use `move_many()` for bulk transitions;
+  data migrations and other bulk writes have to respect the table by hand.
 * A model can have only one phase field, it can't be inherited from a concrete parent model, and it can't be
   nullable.
 * Phases are strings (`PhaseField`) or small positive integers (`IntegerPhaseField`). Other column types aren't

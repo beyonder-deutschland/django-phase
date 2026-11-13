@@ -2,7 +2,7 @@ import datetime
 from unittest import mock
 
 from django.db import connection
-from django.db.models import F
+from django.db.models import F, signals
 from django.test import TestCase
 
 from phase.exceptions import (
@@ -378,6 +378,154 @@ class IntegerPhaseFieldTest(TestCase):
             invoice.save()
 
         self.assertEqual(context.exception.phases, {"status": Invoice.Status.DRAFT})
+
+
+class MoveManyTest(TestCase):
+    def setUp(self):
+        self.field = Order._meta.get_field("status")
+
+    def test_moves_rows_in_source_and_writes_fields(self):
+        first, second = Order.objects.create(), Order.objects.create()
+
+        moved = self.field.move_many(
+            queryset=Order.objects.all(), source=Order.Status.OPEN, to=Order.Status.CANCELLED, note="expired"
+        )
+
+        self.assertEqual(moved, 2)
+        self.assertQuerySetEqual(
+            Order.objects.order_by("pk").values_list("pk", "status", "note"),
+            [(first.pk, "cancelled", "expired"), (second.pk, "cancelled", "expired")],
+        )
+
+    def test_skips_rows_in_another_phase(self):
+        open_order = Order.objects.create()
+        paid_order = Order.objects.create()
+        self.field.move(obj=paid_order, to=Order.Status.PAID)
+
+        moved = self.field.move_many(queryset=Order.objects.all(), source=Order.Status.OPEN, to=Order.Status.CANCELLED)
+
+        self.assertEqual(moved, 1)
+        self.assertEqual(Order.objects.get(pk=open_order.pk).status, Order.Status.CANCELLED)
+        self.assertEqual(Order.objects.get(pk=paid_order.pk).status, Order.Status.PAID)
+
+    def test_leaves_rows_outside_the_queryset_alone(self):
+        chosen = Order.objects.create()
+        other = Order.objects.create()
+
+        self.field.move_many(
+            queryset=Order.objects.filter(pk=chosen.pk), source=Order.Status.OPEN, to=Order.Status.CANCELLED
+        )
+
+        self.assertEqual(Order.objects.get(pk=other.pk).status, Order.Status.OPEN)
+
+    def test_writes_with_one_query(self):
+        Order.objects.create()
+        Order.objects.create()
+
+        with self.assertNumQueries(1):
+            self.field.move_many(queryset=Order.objects.all(), source=Order.Status.OPEN, to=Order.Status.CANCELLED)
+
+    def test_refuses_transition_missing_from_table_before_writing(self):
+        Order.objects.create()
+
+        with (
+            self.assertNumQueries(0),
+            self.assertRaisesMessage(
+                IllegalPhaseTransitionError, "testapp.Order cannot change from 'open' to 'shipped'."
+            ) as context,
+        ):
+            self.field.move_many(queryset=Order.objects.all(), source=Order.Status.OPEN, to=Order.Status.SHIPPED)
+
+        self.assertIsNone(context.exception.pk)
+        self.assertEqual(context.exception.source, Order.Status.OPEN)
+        self.assertEqual(Order.objects.get().status, Order.Status.OPEN)
+
+    def test_refuses_the_phase_among_fields(self):
+        Order.objects.create()
+
+        with self.assertRaises(ProtectedPhaseFieldError):
+            self.field.move_many(
+                queryset=Order.objects.all(),
+                source=Order.Status.OPEN,
+                to=Order.Status.PAID,
+                status=Order.Status.SHIPPED,
+            )
+
+        self.assertEqual(Order.objects.get().status, Order.Status.OPEN)
+
+    def test_writes_expressions(self):
+        Order.objects.create()
+
+        self.field.move_many(
+            queryset=Order.objects.all(),
+            source=Order.Status.OPEN,
+            to=Order.Status.PAID,
+            transition_count=F("transition_count") + 1,
+        )
+
+        self.assertEqual(Order.objects.get().transition_count, 1)
+
+    def test_stamps_auto_now_fields_of_moved_rows_only(self):
+        open_order = Order.objects.create()
+        paid_order = Order.objects.create()
+        self.field.move(obj=paid_order, to=Order.Status.PAID)
+
+        with mock.patch("django.utils.timezone.now", return_value=NOW):
+            self.field.move_many(queryset=Order.objects.all(), source=Order.Status.OPEN, to=Order.Status.CANCELLED)
+
+        self.assertEqual(Order.objects.get(pk=open_order.pk).updated_at, NOW)
+        self.assertEqual(Order.objects.get(pk=paid_order.pk).updated_at, paid_order.updated_at)
+
+    def test_auto_now_wins_over_given_value_as_in_save(self):
+        Order.objects.create()
+
+        with mock.patch("django.utils.timezone.now", return_value=NOW):
+            self.field.move_many(
+                queryset=Order.objects.all(),
+                source=Order.Status.OPEN,
+                to=Order.Status.PAID,
+                updated_at=NOW - datetime.timedelta(days=1),
+            )
+
+        self.assertEqual(Order.objects.get().updated_at, NOW)
+
+    def test_sends_no_signals(self):
+        Order.objects.create()
+        receiver = mock.Mock()
+        signals.pre_save.connect(receiver, sender=Order)
+        signals.post_save.connect(receiver, sender=Order)
+        self.addCleanup(signals.pre_save.disconnect, receiver, sender=Order)
+        self.addCleanup(signals.post_save.disconnect, receiver, sender=Order)
+
+        self.field.move_many(queryset=Order.objects.all(), source=Order.Status.OPEN, to=Order.Status.PAID)
+
+        receiver.assert_not_called()
+
+    def test_instance_in_memory_becomes_stale(self):
+        order = Order.objects.create()
+
+        self.field.move_many(queryset=Order.objects.all(), source=Order.Status.OPEN, to=Order.Status.CANCELLED)
+
+        self.assertEqual(order.status, Order.Status.OPEN)
+        with self.assertRaises(StalePhaseError):
+            order.save()
+
+    def test_numeric_phases_are_named_by_label(self):
+        with self.assertRaisesMessage(
+            IllegalPhaseTransitionError, "testapp.Invoice cannot change from 'Draft' (1) to 'Paid' (3)."
+        ):
+            Invoice._meta.get_field("status").move_many(
+                queryset=Invoice.objects.all(), source=Invoice.Status.DRAFT, to=Invoice.Status.PAID
+            )
+
+    def test_moves_numeric_phases(self):
+        invoice = Invoice.objects.create()
+
+        Invoice._meta.get_field("status").move_many(
+            queryset=Invoice.objects.all(), source=Invoice.Status.DRAFT, to=Invoice.Status.SENT
+        )
+
+        self.assertEqual(Invoice.objects.get(pk=invoice.pk).status, Invoice.Status.SENT)
 
 
 class PhaseLabelTest(TestCase):

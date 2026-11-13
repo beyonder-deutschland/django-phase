@@ -3,7 +3,7 @@ from django.test import TestCase
 
 from phase.exceptions import IllegalPhaseTransitionError, MissingPhaseFieldError
 from phase.fields import get_phase_field
-from phase.transitions import can_transition, move, targets
+from phase.transitions import can_transition, move, move_many, targets
 from testapp.models import Order
 
 
@@ -28,6 +28,21 @@ class TransitionsTest(TestCase):
 
         with self.assertRaises(IllegalPhaseTransitionError):
             move(obj=order, to=Order.Status.SHIPPED)
+
+    def test_move_many(self):
+        order = Order.objects.create()
+
+        moved = move_many(
+            queryset=Order.objects.filter(pk=order.pk), source=Order.Status.OPEN, to=Order.Status.PAID, note="paid"
+        )
+
+        self.assertEqual(moved, 1)
+        order.refresh_from_db()
+        self.assertEqual((order.status, order.note), (Order.Status.PAID, "paid"))
+
+    def test_move_many_of_model_without_phase_field(self):
+        with self.assertRaises(MissingPhaseFieldError):
+            move_many(queryset=Group.objects.all(), source="open", to="paid")
 
     def test_can_transition(self):
         order = Order(status=Order.Status.PAID)

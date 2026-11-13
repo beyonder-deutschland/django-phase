@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+from types import SimpleNamespace
 
 from django.db import models, router
 from django.db.models import signals
@@ -150,6 +151,34 @@ class PhaseFieldMixin:
         signals.post_save.send(
             sender=model, instance=obj, created=False, update_fields=update_fields, raw=False, using=using
         )
+
+    def move_many(self, *, queryset: models.QuerySet, source: Phase, to: Phase, **fields: object) -> int:
+        """
+        Move the rows of `queryset` that are in phase `source` to phase `to` with one conditional UPDATE.
+
+        The UPDATE also writes `fields` and stamps the model's `auto_now` fields. Rows in another phase are skipped,
+        so the return value, the number of rows moved, may be lower than the size of `queryset`. Like
+        `QuerySet.update()` this sends no signals and leaves instances in memory as they are.
+        """
+        if self.name in fields or self.attname in fields:
+            raise ProtectedPhaseFieldError(field_name=self.attname)
+        if to not in self.transitions.get(source, ()):
+            raise IllegalPhaseTransitionError(
+                model_name=queryset.model._meta.label,
+                pk=None,
+                source=source,
+                target=to,
+                source_label=self.label(source),
+                target_label=self.label(to),
+            )
+        values = {self.attname: to, **fields}
+        stamp = SimpleNamespace()
+        for field in queryset.model._meta.concrete_fields:
+            if getattr(field, "auto_now", False):
+                # As in `save()` and `move()`, the current time wins over a value given for an `auto_now` field.
+                # `Field.pre_save()` only sets the attribute on the object it is given; nothing reads it back here.
+                values[field.attname] = field.pre_save(stamp, add=False)
+        return queryset.filter(**{self.attname: source}).update(**values)
 
     def _illegal_transition(self, *, obj: models.Model, source: Phase | None, to: Phase) -> IllegalPhaseTransitionError:
         return IllegalPhaseTransitionError(

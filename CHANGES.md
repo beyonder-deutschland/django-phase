@@ -1,5 +1,10 @@
 # Changelog
 
+**0.3.0** (2026-11-13)
+  * `move_many()`: moves the rows of a queryset from one phase to another with one conditional `UPDATE`, checked
+    against the transition table, and returns the number of rows moved
+  * `IllegalPhaseTransitionError` leaves out the ID when it refuses a transition for a set of rows
+
 **0.2.0** (2026-11-13)
   * `IntegerPhaseField`: a phase stored as a number, e.g. the values of an `IntegerChoices`, in a
     `PositiveSmallIntegerField`

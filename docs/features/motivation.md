@@ -66,8 +66,8 @@ to you.
 
 * You own edge cases a large library has already met in many projects. The ones known so far — deferred fields,
   `refresh_from_db()`, `full_clean()`, `db_default`, pickling of the exceptions — are covered by tests.
-* `QuerySet.update()` and `bulk_update()` bypass field and mixin; data migrations and bulk writes have to respect the
-  table by hand.
+* `QuerySet.update()` and `bulk_update()` bypass field and mixin; data migrations and bulk writes other than
+  `move_many()` have to respect the table by hand. `move_many()` sends no signals.
 * Every save of an existing instance costs one extra `SELECT … FOR UPDATE`.
 * A model can have only one `PhaseField`, and none inherited from a concrete parent model.
 * An instance loaded without its phase (`defer()`, `only()`) is saved unguarded.

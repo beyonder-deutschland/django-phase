@@ -15,9 +15,11 @@ Creator & Maintainer: [Beyonder Deutschland](https://beyonder.de/)
 ## Features
 
 * Declare the allowed transitions once, as a table on the field
-* Assigning the phase directly raises; only `move()` changes it
+* Assigning the phase directly raises; only `move()` and `move_many()` change it
 * `move()` writes phase and further fields in **one** conditional `UPDATE`, so of two concurrent transitions from the
   same phase exactly one succeeds
+* `move_many()` moves a whole queryset from one phase to another with one conditional `UPDATE`, checked against
+  the same table
 * Every `save()` is guarded against a stale phase, so it can't silently undo a concurrent transition
 * Phases as strings (`PhaseField`) or numbers (`IntegerPhaseField`); migrations see a plain Django field and never
   import `phase`

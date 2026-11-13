@@ -8,7 +8,8 @@ class IllegalPhaseTransitionError(Exception):
     The transition isn't in the table, or the row changed or vanished since `obj` was loaded.
 
     `source` is the phase in the database when the row changed in the meantime, and `None` when the row doesn't exist.
-    `source` and `target` are the stored values; the labels only make the message readable.
+    `source` and `target` are the stored values; the labels only make the message readable. `pk` is `None` when
+    `move_many()` refused the transition for a set of rows rather than for one instance.
     """
 
     def __init__(  # noqa: PLR0913
@@ -30,6 +31,8 @@ class IllegalPhaseTransitionError(Exception):
         quoted_target = _quote(target, target_label)
         if source is None:
             message = f"{model_name} ID #{pk} doesn't exist in the database and cannot change to {quoted_target}."
+        elif pk is None:
+            message = f"{model_name} cannot change from {_quote(source, source_label)} to {quoted_target}."
         else:
             message = f"{model_name} ID #{pk} cannot change from {_quote(source, source_label)} to {quoted_target}."
         super().__init__(message)
