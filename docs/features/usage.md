@@ -99,3 +99,19 @@ class OrderTransitions:
 
 Several actions may lead to the same transition. The table says which phase pairs are allowed; the actions say what
 else happens.
+
+### Suggested conventions
+
+`phase` doesn't enforce any of this, but a fixed scheme makes actions easy to find without knowing them:
+
+* **One class per model, named `<Model>Transitions`**, with the full model name, in `transitions/<model>.py` of the
+  model's app — `OrderTransitions` in `shop/transitions/order.py`. The class is only a namespace for static methods.
+  No abbreviations, so class and file are found by the model name alone.
+* **An action is named after the business action, as a verb** — `pay`, `ship`, `cancel`. Mostly that matches the target
+  phase; where it doesn't, the business action wins: a `reject_return()` that moves the order back to `SHIPPED` is
+  still named after what the user does.
+* **The object is passed as a keyword named after the model** — `order=`, not `obj=` or `instance=`. Further inputs are
+  keyword-only as well.
+* **Conditions beyond the table are checked in the action, before `move()`**, and raise a `PhaseGuardError` subclass,
+  see "Refused actions".
+* **Callers use the action, never `move()` directly**, and don't check the phase themselves.

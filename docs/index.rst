@@ -7,6 +7,7 @@ django-phase
    :maxdepth: 1
    :caption: Contents:
 
+   features/motivation.md
    features/setup.md
    features/usage.md
    features/refused_actions.md
