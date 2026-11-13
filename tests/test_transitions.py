@@ -1,13 +1,19 @@
+from django.contrib.auth.models import Group
 from django.test import TestCase
 
-from phase.exceptions import IllegalPhaseTransitionError
-from phase.transitions import can_transition, move, phase_field, targets
+from phase.exceptions import IllegalPhaseTransitionError, MissingPhaseFieldError
+from phase.fields import get_phase_field
+from phase.transitions import can_transition, move, targets
 from testapp.models import Order
 
 
 class TransitionsTest(TestCase):
-    def test_phase_field_finds_the_field(self):
-        self.assertIs(phase_field(model=Order), Order._meta.get_field("status"))
+    def test_get_phase_field_finds_the_field(self):
+        self.assertIs(get_phase_field(model=Order), Order._meta.get_field("status"))
+
+    def test_get_phase_field_of_model_without_one(self):
+        with self.assertRaisesMessage(MissingPhaseFieldError, "auth.Group has no PhaseField."):
+            get_phase_field(model=Group)
 
     def test_move(self):
         order = Order.objects.create()

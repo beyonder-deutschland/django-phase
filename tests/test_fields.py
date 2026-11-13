@@ -1,3 +1,6 @@
+import datetime
+from unittest import mock
+
 from django.db.models import F
 from django.test import TestCase
 
@@ -6,9 +9,12 @@ from phase.exceptions import (
     IllegalPhaseTransitionError,
     InvalidTransitionTableError,
     ProtectedPhaseFieldError,
+    StalePhaseError,
 )
 from phase.fields import PhaseField
-from testapp.models import Order
+from testapp.models import Order, Shipment
+
+NOW = datetime.datetime(2026, 11, 13, 9, 0, tzinfo=datetime.UTC)
 
 
 class PhaseFieldInitTest(TestCase):
@@ -65,6 +71,13 @@ class ProtectedPhaseDescriptorTest(TestCase):
 
         self.assertEqual(deferred_order.status, Order.Status.PAID)
 
+    def test_db_default_is_replaced_by_stored_value(self):
+        shipment = Shipment.objects.create()
+
+        self.assertEqual(shipment.status, "packed")
+        with self.assertRaises(ProtectedPhaseFieldError):
+            shipment.status = "sent"
+
 
 class PhaseFieldTransitionTest(TestCase):
     def setUp(self):
@@ -117,14 +130,78 @@ class PhaseFieldTransitionTest(TestCase):
     def test_move_refuses_the_loser_of_a_race(self):
         order = Order.objects.create()
         winner = Order.objects.get(pk=order.pk)
-        self.field.move(obj=winner, to=Order.Status.CANCELLED)
+        self.field.move(obj=winner, to=Order.Status.CANCELLED, note="cancelled by phone")
 
         with self.assertRaises(IllegalPhaseTransitionError) as context:
             self.field.move(obj=order, to=Order.Status.PAID, note="never written")
 
         self.assertEqual(context.exception.source, Order.Status.CANCELLED)
         self.assertEqual(context.exception.target, Order.Status.PAID)
-        self.assertEqual(order.status, Order.Status.CANCELLED)
         stored = Order.objects.get(pk=order.pk)
         self.assertEqual(stored.status, Order.Status.CANCELLED)
-        self.assertEqual(stored.note, "")
+        self.assertEqual(stored.note, "cancelled by phone")
+
+    def test_loser_of_a_race_stays_stale(self):
+        order = Order.objects.create()
+        self.field.move(obj=Order.objects.get(pk=order.pk), to=Order.Status.CANCELLED, note="cancelled by phone")
+        with self.assertRaises(IllegalPhaseTransitionError):
+            self.field.move(obj=order, to=Order.Status.PAID)
+
+        with self.assertRaises(StalePhaseError):
+            order.save()
+
+        self.assertEqual(order.status, Order.Status.OPEN)
+        self.assertEqual(Order.objects.get(pk=order.pk).note, "cancelled by phone")
+
+    def test_move_of_deleted_row(self):
+        order = Order.objects.create()
+        Order.objects.filter(pk=order.pk).delete()
+
+        with self.assertRaisesMessage(
+            IllegalPhaseTransitionError,
+            f"testapp.Order ID #{order.pk} doesn't exist in the database and cannot change to 'paid'.",
+        ) as context:
+            self.field.move(obj=order, to=Order.Status.PAID)
+
+        self.assertIsNone(context.exception.source)
+
+    def test_move_of_unsaved_instance(self):
+        with self.assertRaises(IllegalPhaseTransitionError) as context:
+            self.field.move(obj=Order(), to=Order.Status.PAID)
+
+        self.assertIsNone(context.exception.source)
+
+    def test_move_writes_auto_now_fields(self):
+        order = Order.objects.create()
+
+        with mock.patch("django.utils.timezone.now", return_value=NOW):
+            self.field.move(obj=order, to=Order.Status.PAID)
+
+        self.assertEqual(order.updated_at, NOW)
+        self.assertEqual(Order.objects.get(pk=order.pk).updated_at, NOW)
+
+    def test_move_prefers_given_value_over_auto_now(self):
+        order = Order.objects.create()
+        given = NOW - datetime.timedelta(days=1)
+
+        with mock.patch("django.utils.timezone.now", return_value=NOW):
+            self.field.move(obj=order, to=Order.Status.PAID, updated_at=given)
+
+        self.assertEqual(order.updated_at, given)
+
+    def test_refused_move_leaves_auto_now_fields_untouched(self):
+        order = Order.objects.create()
+        loaded_updated_at = order.updated_at
+        self.field.move(obj=Order.objects.get(pk=order.pk), to=Order.Status.CANCELLED)
+
+        with mock.patch("django.utils.timezone.now", return_value=NOW), self.assertRaises(IllegalPhaseTransitionError):
+            self.field.move(obj=order, to=Order.Status.PAID)
+
+        self.assertEqual(order.updated_at, loaded_updated_at)
+
+    def test_move_ignores_default_manager_filter(self):
+        shipment = Shipment.objects.create(archived=True)
+
+        Shipment._meta.get_field("status").move(obj=shipment, to="sent")
+
+        self.assertEqual(shipment.status, "sent")

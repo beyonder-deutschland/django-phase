@@ -3,7 +3,7 @@ from django.test import TestCase
 from phase.exceptions import StalePhaseError
 from phase.fields import REFRESHING_FLAG
 from phase.transitions import move
-from testapp.models import Order
+from testapp.models import Order, Shipment
 
 
 class PhaseGuardMixinSaveTest(TestCase):
@@ -44,6 +44,64 @@ class PhaseGuardMixinSaveTest(TestCase):
         deferred_order.save()
 
         self.assertEqual(Order.objects.get(pk=order.pk).note, "gift wrap")
+
+    def test_save_of_deleted_row_is_refused(self):
+        order = Order.objects.create()
+        Order.objects.filter(pk=order.pk).delete()
+
+        with self.assertRaises(StalePhaseError):
+            order.save()
+
+    def test_skipped_save_is_not_checked(self):
+        order = Order.objects.create()
+        move(obj=Order.objects.get(pk=order.pk), to=Order.Status.CANCELLED)
+
+        order.save(update_fields=[])
+
+        self.assertEqual(Order.objects.get(pk=order.pk).status, Order.Status.CANCELLED)
+
+    def test_save_with_explicit_database(self):
+        order = Order.objects.create()
+        order.note = "gift wrap"
+
+        order.save(using="default")
+
+        self.assertEqual(Order.objects.get(pk=order.pk).note, "gift wrap")
+
+    def test_save_ignores_default_manager_filter(self):
+        shipment = Shipment.objects.create(archived=True)
+        shipment.refresh_from_db()
+
+        shipment.save()
+
+        self.assertTrue(Shipment._base_manager.get(pk=shipment.pk).archived)
+
+
+class PhaseGuardMixinExplicitPrimaryKeyTest(TestCase):
+    def test_new_row_is_inserted(self):
+        Order(pk=4711, status=Order.Status.PAID).save()
+
+        self.assertEqual(Order.objects.get(pk=4711).status, Order.Status.PAID)
+
+    def test_forced_insert_is_not_checked(self):
+        Order(pk=4711, status=Order.Status.PAID).save(force_insert=True)
+
+        self.assertEqual(Order.objects.get(pk=4711).status, Order.Status.PAID)
+
+    def test_existing_row_with_same_phase_is_updated(self):
+        order = Order.objects.create()
+
+        Order(pk=order.pk, status=Order.Status.OPEN, note="gift wrap").save()
+
+        self.assertEqual(Order.objects.get(pk=order.pk).note, "gift wrap")
+
+    def test_existing_row_with_other_phase_is_refused(self):
+        order = Order.objects.create()
+
+        with self.assertRaises(StalePhaseError):
+            Order(pk=order.pk, status=Order.Status.SHIPPED).save()
+
+        self.assertEqual(Order.objects.get(pk=order.pk).status, Order.Status.OPEN)
 
 
 class PhaseGuardMixinRefreshTest(TestCase):

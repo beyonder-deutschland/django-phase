@@ -1,5 +1,6 @@
 from unittest import mock
 
+from django.apps import apps
 from django.core import checks
 from django.db import models
 from django.test import SimpleTestCase
@@ -16,6 +17,27 @@ class CheckPhaseFieldsTest(SimpleTestCase):
 
     def test_installed_models_pass(self):
         self.assertEqual(check_phase_fields(), [])
+
+    def test_only_given_apps_are_checked(self):
+        self.assertEqual(check_phase_fields(app_configs=[apps.get_app_config("testapp")]), [])
+
+    @isolate_apps("testapp")
+    def test_proxy_model_is_reported_once(self):
+        class Parcel(models.Model):  # noqa: DJ008
+            status = PhaseField(max_length=10, transitions={})
+
+            class Meta:
+                app_label = "testapp"
+
+        class ParcelProxy(Parcel):  # noqa: DJ008
+            class Meta:
+                app_label = "testapp"
+                proxy = True
+
+        with mock.patch("phase.checks.apps.get_models", return_value=[Parcel, ParcelProxy]):
+            errors = check_phase_fields()
+
+        self.assertEqual([(error.id, error.obj) for error in errors], [("phase.E001", Parcel)])
 
     @isolate_apps("testapp")
     def test_phase_field_without_mixin(self):

@@ -1,3 +1,4 @@
+import copy
 from collections.abc import Mapping
 
 from django.db import models
@@ -7,6 +8,7 @@ from phase.exceptions import (
     EditablePhaseFieldError,
     IllegalPhaseTransitionError,
     InvalidTransitionTableError,
+    MissingPhaseFieldError,
     ProtectedPhaseFieldError,
 )
 
@@ -20,13 +22,23 @@ class ProtectedPhaseDescriptor(DeferredAttribute):
 
     Django sets field values with `setattr` when it builds an instance (constructor, loading from the database) and
     when it fetches a deferred field; in all these cases the instance holds no value yet. A reload through
-    `PhaseGuardMixin.refresh_from_db()` may overwrite it, because it writes what the database holds.
+    `PhaseGuardMixin.refresh_from_db()` may overwrite it, because it writes what the database holds. So may Django
+    after an INSERT, when it replaces an expression such as a `db_default` with the value the database returned.
     """
 
     def __set__(self, instance: models.Model, value: str) -> None:
-        if self.field.attname in instance.__dict__ and not instance.__dict__.get(REFRESHING_FLAG):
+        if (
+            self.field.attname in instance.__dict__
+            and not instance.__dict__.get(REFRESHING_FLAG)
+            and not is_expression(instance.__dict__[self.field.attname])
+        ):
             raise ProtectedPhaseFieldError(field_name=self.field.attname)
         instance.__dict__[self.field.attname] = value
+
+
+def is_expression(value: object) -> bool:
+    """A placeholder the database resolves, e.g. `DatabaseDefault` for a field with `db_default` before the INSERT."""
+    return hasattr(value, "resolve_expression")
 
 
 class PhaseField(models.CharField):
@@ -73,23 +85,54 @@ class PhaseField(models.CharField):
 
     def move(self, *, obj: models.Model, to: str, **fields: object) -> None:
         """
-        Move `obj` to phase `to` and write `fields` in the same UPDATE.
+        Move `obj` to phase `to` and write `fields` and the model's `auto_now` fields in the same UPDATE.
 
-        `obj` is refreshed afterwards, so field values given as expressions are read back as stored values.
+        On success `obj` is refreshed, so field values given as expressions are read back as stored values. On failure
+        `obj` stays as it was: its phase no longer matches the database, so a later `save()` is refused as stale
+        instead of overwriting what the winner of a race wrote.
+
+        Like `QuerySet.update()`, this sends no `pre_save`/`post_save` signals and doesn't call `save()`.
         """
         source = getattr(obj, self.attname)
         if not self.can_transition(obj=obj, to=to):
             raise IllegalPhaseTransitionError(model_name=obj._meta.label, pk=obj.pk, source=source, target=to)
 
-        updated_rows = (
-            type(obj)
-            ._default_manager.filter(pk=obj.pk, **{self.attname: source})
-            .update(**{self.attname: to}, **fields)
-        )
+        rows = type(obj)._base_manager.db_manager(obj._state.db).filter(pk=obj.pk)
+        auto_now_values = self._auto_now_values(obj=obj, fields=fields)
+        updated_rows = rows.filter(**{self.attname: source}).update(**{self.attname: to}, **auto_now_values, **fields)
         if not updated_rows:
-            obj.refresh_from_db(fields=[self.attname])
             raise IllegalPhaseTransitionError(
-                model_name=obj._meta.label, pk=obj.pk, source=getattr(obj, self.attname), target=to
+                model_name=obj._meta.label,
+                pk=obj.pk,
+                source=rows.values_list(self.attname, flat=True).first(),
+                target=to,
             )
 
-        obj.refresh_from_db(fields=[self.attname, *fields])
+        obj.refresh_from_db(fields=[self.attname, *auto_now_values, *fields])
+
+    @staticmethod
+    def _auto_now_values(*, obj: models.Model, fields: Mapping[str, object]) -> dict[str, object]:
+        # `pre_save()` computes the value as `save()` would, but also assigns it; a copy keeps `obj` untouched until the
+        # UPDATE succeeded.
+        stamped = copy.copy(obj)
+        return {
+            field.attname: field.pre_save(stamped, add=False)
+            for field in obj._meta.concrete_fields
+            if getattr(field, "auto_now", False) and field.name not in fields and field.attname not in fields
+        }
+
+
+def get_phase_fields(*, model: type[models.Model]) -> tuple[PhaseField, ...]:
+    return tuple(field for field in model._meta.concrete_fields if isinstance(field, PhaseField))
+
+
+def get_phase_field(*, model: type[models.Model]) -> PhaseField:
+    """
+    Return the one `PhaseField` of `model`.
+
+    A model has at most one phase field (system check `phase.E002`), so callers never name the field.
+    """
+    phase_fields = get_phase_fields(model=model)
+    if not phase_fields:
+        raise MissingPhaseFieldError(model_name=model._meta.label)
+    return phase_fields[0]

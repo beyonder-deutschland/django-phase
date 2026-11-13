@@ -55,8 +55,16 @@ move(obj=order, to=Order.Status.PAID, paid_at=timezone.now())
 * `move(obj=…, to=…, **fields)` checks the table and writes the phase and `fields` in **one** conditional `UPDATE`
   (`filter(pk=…, <field>=<source>).update(…)`). If no row changes, a concurrent request won the race and
   `IllegalPhaseTransitionError` is raised, exactly as for a transition missing from the table.
-* Afterwards the instance is refreshed from the database, so `fields` given as expressions (`F("count") + 1`) are read
+* The same `UPDATE` also stamps the model's `auto_now` fields, unless `fields` sets them.
+* On success the instance is refreshed from the database, so `fields` given as expressions (`F("count") + 1`) are read
   back as stored values.
+* On failure the instance stays as it was. Its phase no longer matches the database, so a later `save()` is refused
+  with `StalePhaseError` instead of overwriting what the winner of the race wrote. Reload it to go on. The exception's
+  `source` is the phase in the database, or `None` if the row doesn't exist (anymore).
+* `move()` writes like `QuerySet.update()`: it sends no `pre_save`/`post_save` signals and doesn't call the model's
+  `save()`. React to a phase change in the action that calls `move()`, see below.
+* The row is addressed through the model's base manager on the instance's database, so a filtering default manager
+  doesn't hide it.
 * `can_transition(obj=…, to=…)` and `targets(obj=…)` answer read-only questions. They only know the table, not further
   conditions your code checks.
 
@@ -69,6 +77,8 @@ Every model with a `PhaseField` inherits `PhaseGuardMixin` (system check `phase.
   and refuses the save with `StalePhaseError` if the phase in the database differs from the instance. This also covers
   saves that don't touch the phase (`save(update_fields=["note"])`), which would otherwise silently undo a concurrent
   transition. The price is one extra `SELECT … FOR UPDATE` per save of an existing instance.
+* A **new instance with an explicit primary key** is checked the same way when a row with that key exists, because
+  Django then updates that row instead of inserting.
 
 ## Limits
 

@@ -1,10 +1,20 @@
 class IllegalPhaseTransitionError(Exception):
-    def __init__(self, *, model_name: str, pk: int, source: str, target: str):
+    """
+    The transition isn't in the table, or the row changed or vanished since `obj` was loaded.
+
+    `source` is the phase in the database when the row changed in the meantime, and `None` when the row doesn't exist.
+    """
+
+    def __init__(self, *, model_name: str, pk: int | None, source: str | None, target: str):
         self.model_name = model_name
         self.pk = pk
         self.source = source
         self.target = target
-        super().__init__(f"{model_name} ID #{pk} cannot change from '{source}' to '{target}'.")
+        if source is None:
+            message = f"{model_name} ID #{pk} doesn't exist in the database and cannot change to '{target}'."
+        else:
+            message = f"{model_name} ID #{pk} cannot change from '{source}' to '{target}'."
+        super().__init__(message)
 
     def __reduce__(self) -> tuple:
         # The parallel test runner sends failures between processes; the default reduce calls __init__ positionally.
@@ -12,7 +22,7 @@ class IllegalPhaseTransitionError(Exception):
 
 
 def _rebuild_illegal_phase_transition_error(
-    model_name: str, pk: int, source: str, target: str
+    model_name: str, pk: int | None, source: str | None, target: str
 ) -> IllegalPhaseTransitionError:
     return IllegalPhaseTransitionError(model_name=model_name, pk=pk, source=source, target=target)
 
@@ -59,3 +69,8 @@ class EditablePhaseFieldError(TypeError):
 class InvalidTransitionTableError(TypeError):
     def __init__(self, *, source: str):
         super().__init__(f"Targets of phase '{source}' must be a tuple, e.g. ('declined',) for a single target.")
+
+
+class MissingPhaseFieldError(TypeError):
+    def __init__(self, *, model_name: str):
+        super().__init__(f"{model_name} has no PhaseField.")

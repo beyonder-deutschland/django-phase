@@ -2,7 +2,12 @@ import pickle
 
 from django.test import SimpleTestCase
 
-from phase.exceptions import IllegalPhaseTransitionError, PhaseGuardError, StalePhaseError
+from phase.exceptions import (
+    IllegalPhaseTransitionError,
+    MissingPhaseFieldError,
+    PhaseGuardError,
+    StalePhaseError,
+)
 
 
 class IllegalPhaseTransitionErrorTest(SimpleTestCase):
@@ -50,3 +55,8 @@ class PhaseGuardErrorTest(SimpleTestCase):
         self.assertEqual(error.code, "order_already_shipped")
         self.assertEqual(error.detail, "The order has already been shipped.")
         self.assertEqual(str(error), "Order ID #7 is already shipped.")
+
+
+class MissingPhaseFieldErrorTest(SimpleTestCase):
+    def test_message(self):
+        self.assertEqual(str(MissingPhaseFieldError(model_name="shop.Order")), "shop.Order has no PhaseField.")
