@@ -1,0 +1,11 @@
+name: Unit tests
+
+on:
+  push:
+    branches:
+    - main
+  pull_request:
+
+jobs:
+  ci:
+    uses: ./.github/workflows/quality-gate.yml
