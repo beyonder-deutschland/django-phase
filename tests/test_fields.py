@@ -247,6 +247,14 @@ class PhaseFieldTransitionTest(TestCase):
         self.assertEqual(shipment.status, "sent")
         self.assertEqual(Shipment.objects.get(pk=shipment.pk).status, "sent")
 
+    def test_move_resolves_db_default_placeholder_on_saved_instance(self):
+        shipment = Shipment.objects.create()
+        shipment.__dict__["status"] = Shipment().__dict__["status"]
+
+        Shipment._meta.get_field("status").move(obj=shipment, to="sent")
+
+        self.assertEqual(shipment.status, "sent")
+
     def test_move_of_unsaved_instance_with_db_default(self):
         with self.assertRaisesMessage(IllegalPhaseTransitionError, "doesn't exist in the database"):
             Shipment._meta.get_field("status").move(obj=Shipment(), to="sent")
