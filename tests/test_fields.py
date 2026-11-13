@@ -59,6 +59,27 @@ class ProtectedPhaseDescriptorTest(TestCase):
 
         self.assertEqual(order.status, Order.Status.OPEN)
 
+    def test_assigning_the_current_phase_passes(self):
+        order = Order.objects.create()
+
+        order.status = Order.Status.OPEN
+
+        self.assertEqual(order.status, Order.Status.OPEN)
+
+    def test_full_clean_of_saved_instance(self):
+        order = Order.objects.create()
+
+        order.full_clean()
+
+        self.assertEqual(order.status, Order.Status.OPEN)
+
+    def test_full_clean_of_unsaved_instance(self):
+        order = Order(status=Order.Status.PAID)
+
+        order.full_clean()
+
+        self.assertEqual(order.status, Order.Status.PAID)
+
     def test_loading_from_database_sets_phase(self):
         order = Order.objects.create(status=Order.Status.PAID)
 
@@ -77,6 +98,24 @@ class ProtectedPhaseDescriptorTest(TestCase):
         self.assertEqual(shipment.status, "packed")
         with self.assertRaises(ProtectedPhaseFieldError):
             shipment.status = "sent"
+
+    def test_create_with_explicit_phase_despite_db_default(self):
+        shipment = Shipment.objects.create(status="sent")
+
+        self.assertEqual(shipment.status, "sent")
+        self.assertEqual(Shipment.objects.get(pk=shipment.pk).status, "sent")
+
+    def test_save_with_explicit_phase_despite_db_default(self):
+        shipment = Shipment(status="packed")
+
+        shipment.save()
+
+        self.assertEqual(shipment.status, "packed")
+
+    def test_bulk_create_with_explicit_phase_despite_db_default(self):
+        Shipment.objects.bulk_create([Shipment(status="sent")])
+
+        self.assertEqual(Shipment.objects.get().status, "sent")
 
 
 class PhaseFieldTransitionTest(TestCase):
@@ -197,6 +236,14 @@ class PhaseFieldTransitionTest(TestCase):
             self.field.move(obj=order, to=Order.Status.PAID)
 
         self.assertEqual(order.updated_at, loaded_updated_at)
+
+    def test_move_refreshes_from_the_database_it_wrote_to(self):
+        order = Order.objects.create()
+
+        with mock.patch.object(Order, "refresh_from_db", autospec=True) as refresh_from_db:
+            self.field.move(obj=order, to=Order.Status.PAID)
+
+        self.assertEqual(refresh_from_db.call_args.kwargs["using"], "default")
 
     def test_move_ignores_default_manager_filter(self):
         shipment = Shipment.objects.create(archived=True)

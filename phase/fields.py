@@ -24,6 +24,9 @@ class ProtectedPhaseDescriptor(DeferredAttribute):
     when it fetches a deferred field; in all these cases the instance holds no value yet. A reload through
     `PhaseGuardMixin.refresh_from_db()` may overwrite it, because it writes what the database holds. So may Django
     after an INSERT, when it replaces an expression such as a `db_default` with the value the database returned.
+
+    Assigning the value the instance already holds changes nothing and passes. Django does that in
+    `Model.clean_fields()` and when it writes back the columns an INSERT returned.
     """
 
     def __set__(self, instance: models.Model, value: str) -> None:
@@ -31,6 +34,7 @@ class ProtectedPhaseDescriptor(DeferredAttribute):
             self.field.attname in instance.__dict__
             and not instance.__dict__.get(REFRESHING_FLAG)
             and not is_expression(instance.__dict__[self.field.attname])
+            and instance.__dict__[self.field.attname] != value
         ):
             raise ProtectedPhaseFieldError(field_name=self.field.attname)
         instance.__dict__[self.field.attname] = value
@@ -125,7 +129,7 @@ class PhaseField(models.CharField):
                 target=to,
             )
 
-        obj.refresh_from_db(fields=[field.attname for field in written_fields])
+        obj.refresh_from_db(using=using, fields=[field.attname for field in written_fields])
         signals.post_save.send(
             sender=model, instance=obj, created=False, update_fields=update_fields, raw=False, using=using
         )

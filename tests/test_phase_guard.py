@@ -56,7 +56,9 @@ class PhaseGuardMixinSaveTest(TestCase):
         order = Order.objects.create()
         move(obj=Order.objects.get(pk=order.pk), to=Order.Status.CANCELLED)
 
-        order.save(update_fields=[])
+        for empty_update_fields in ([], (), set()):
+            with self.subTest(update_fields=empty_update_fields):
+                order.save(update_fields=empty_update_fields)
 
         self.assertEqual(Order.objects.get(pk=order.pk).status, Order.Status.CANCELLED)
 

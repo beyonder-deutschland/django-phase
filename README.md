@@ -22,7 +22,7 @@ Creator & Maintainer: [Beyonder Deutschland](https://beyonder.de/)
 * Migrations see a plain `CharField` and never import `phase`
 * System checks catch a missing mixin or a second phase field
 * `PhaseGuardError` gives refused actions a stable `code` for machines and a `detail` for humans
-* Uses documented Django API only
+* Overrides no private Django method
 
 ```python
 from django.db import models

@@ -4,10 +4,21 @@ from django.test import SimpleTestCase
 
 from phase.exceptions import (
     IllegalPhaseTransitionError,
+    InvalidTransitionTableError,
     MissingPhaseFieldError,
     PhaseGuardError,
+    ProtectedPhaseFieldError,
     StalePhaseError,
 )
+
+
+class OrderAlreadyShippedError(PhaseGuardError):
+    code = "order_already_shipped"
+    detail = "The order has already been shipped."
+
+    def __init__(self, *, pk: int):
+        self.pk = pk
+        super().__init__(f"Order ID #{pk} is already shipped.")
 
 
 class IllegalPhaseTransitionErrorTest(SimpleTestCase):
@@ -55,6 +66,30 @@ class PhaseGuardErrorTest(SimpleTestCase):
         self.assertEqual(error.code, "order_already_shipped")
         self.assertEqual(error.detail, "The order has already been shipped.")
         self.assertEqual(str(error), "Order ID #7 is already shipped.")
+
+    def test_subclass_with_keyword_constructor_survives_pickling(self):
+        error = OrderAlreadyShippedError(pk=7)
+
+        restored = pickle.loads(pickle.dumps(error))
+
+        self.assertIsInstance(restored, OrderAlreadyShippedError)
+        self.assertEqual(restored.pk, 7)
+        self.assertEqual(str(restored), str(error))
+
+
+class KeywordConstructorErrorsTest(SimpleTestCase):
+    def test_survive_pickling(self):
+        errors = (
+            ProtectedPhaseFieldError(field_name="status"),
+            InvalidTransitionTableError(source="open"),
+            MissingPhaseFieldError(model_name="shop.Order"),
+        )
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                restored = pickle.loads(pickle.dumps(error))
+
+                self.assertIs(type(restored), type(error))
+                self.assertEqual(str(restored), str(error))
 
 
 class MissingPhaseFieldErrorTest(SimpleTestCase):

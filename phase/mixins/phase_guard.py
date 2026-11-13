@@ -28,8 +28,10 @@ class PhaseGuardMixin(models.Model):
             for field in self.phase_fields()
             if field.attname in self.__dict__ and not is_expression(self.__dict__[field.attname])
         }
-        # Nothing to compare, an INSERT anyway, or a save Django skips (`update_fields=[]`).
-        if not loaded_phases or self.pk is None or kwargs.get("force_insert") or kwargs.get("update_fields") == []:
+        update_fields = kwargs.get("update_fields")
+        is_skipped_by_django = update_fields is not None and not update_fields
+        # Nothing to compare, an INSERT anyway, or a save Django skips (empty `update_fields`).
+        if not loaded_phases or self.pk is None or kwargs.get("force_insert") or is_skipped_by_django:
             super().save(*args, **kwargs)
             return
 

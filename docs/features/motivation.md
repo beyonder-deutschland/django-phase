@@ -19,7 +19,7 @@ a way of writing the status that rejects everything else — including the loser
   other models belong elsewhere
 * **One readable table per model**, not rules spread over decorators
 * **Side effects only after commit** (`transaction.on_commit`), so a refused transition triggers nothing
-* **Only documented Django API**, so a Django upgrade can't break it unnoticed
+* **No overridden private Django method**, so a Django upgrade can't break it unnoticed
 * **No permanent dependency in migrations**
 
 ## Why not an existing library?
@@ -59,12 +59,13 @@ to you.
 * The table lives on the field, the phase changes only through `move()`, and `move()` is one conditional `UPDATE`. An
   illegal transition and a lost race fail the same way, before anything is saved or sent.
 * The model shrinks to data plus table; the whole lifecycle of a model is readable in one module of actions.
-* Nothing depends on private Django API, and no migration imports `phase`.
+* No private Django method is overridden, and no migration imports `phase`. The field's descriptor relies on where
+  Django assigns field values; the test suite pins those places for every supported Django version.
 
 ## The trade-offs
 
 * You own edge cases a large library has already met in many projects. The ones known so far — deferred fields,
-  `refresh_from_db()`, pickling of the exceptions — are covered by tests.
+  `refresh_from_db()`, `full_clean()`, `db_default`, pickling of the exceptions — are covered by tests.
 * `QuerySet.update()` and `bulk_update()` bypass field and mixin; data migrations and bulk writes have to respect the
   table by hand.
 * Every save of an existing instance costs one extra `SELECT … FOR UPDATE`.
