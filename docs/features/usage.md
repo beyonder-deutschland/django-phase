@@ -105,7 +105,10 @@ move(obj=order, to=Order.Status.PAID, paid_at=timezone.now())
   values on the instance and may still change the written fields (not the phase), `post_save` with `created=False`
   follows a successful `UPDATE` and sees the stored values. A refused transition sends no `post_save`; one that loses a
   race has already sent `pre_save`, as `save()` does when the write fails.
-* The model's own `save()` isn't called.
+* **The model's own `save()` isn't called.** Whatever a `save()` override does — computing fields, validating,
+  triggering side effects — doesn't happen on a transition. Put logic that belongs to every write into a `pre_save` or
+  `post_save` receiver, and logic that belongs to one transition into its action.
+* A successful `move()` costs two queries: the `UPDATE` and a `SELECT` that reloads the written fields.
 * The row is addressed through the model's base manager on the instance's database, so a filtering default manager
   doesn't hide it.
 * `can_transition(obj=…, to=…)` and `targets(obj=…)` answer read-only questions. They only know the table, not further
@@ -113,15 +116,27 @@ move(obj=order, to=Order.Status.PAID, paid_at=timezone.now())
 
 ## The mixin
 
-Every model with a `PhaseField` inherits `PhaseGuardMixin` (system check `phase.E001`). It does two things:
+Every model with a phase field inherits `PhaseGuardMixin` (system check `phase.E001`), listed before `models.Model`:
 
 * `refresh_from_db()` may overwrite the protected field, because it writes what the database holds.
 * **Every `save()` is guarded against a stale phase.** Inside a transaction it locks the row with `select_for_update`
   and refuses the save with `StalePhaseError` if the phase in the database differs from the instance. This also covers
   saves that don't touch the phase (`save(update_fields=["note"])`), which would otherwise silently undo a concurrent
-  transition. The price is one extra `SELECT … FOR UPDATE` per save of an existing instance.
+  transition.
 * A **new instance with an explicit primary key** is checked the same way when a row with that key exists, because
   Django then updates that row instead of inserting.
+* **A `save()` override on the model has to call `super().save()`**, as any override should. The guard lives in the
+  mixin's `save()`; an override that writes on its own way around it saves unguarded. An override also can't assign
+  the phase: that raises `ProtectedPhaseFieldError` like any direct assignment.
+
+### What the guard costs
+
+A guarded save runs three statements on top of its `UPDATE`: the `SELECT … FOR UPDATE` and the transaction around it.
+Inside a transaction that is `SAVEPOINT` and `RELEASE SAVEPOINT`, in autocommit `BEGIN` and `COMMIT`. Tests that count
+queries (`assertNumQueries`) see all three, because a `TestCase` always runs in a transaction.
+
+Only the save of an existing instance with a loaded phase is guarded. An `INSERT` (`create()`, a new instance without a
+primary key, `force_insert=True`) and a save with empty `update_fields` cost nothing extra.
 
 ## Limits
 
