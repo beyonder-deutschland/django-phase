@@ -103,7 +103,7 @@ class PhaseField(models.CharField):
             raise IllegalPhaseTransitionError(model_name=obj._meta.label, pk=obj.pk, source=source, target=to)
 
         model = type(obj)
-        using = obj._state.db or router.db_for_write(model, instance=obj)
+        using = router.db_for_write(model, instance=obj)
         rows = model._base_manager.using(using).filter(pk=obj.pk)
         written_fields = self._written_fields(obj=obj, fields=fields)
         update_fields = frozenset(field.name for field in written_fields)

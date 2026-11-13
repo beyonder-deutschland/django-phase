@@ -41,6 +41,9 @@ class Order(PhaseGuardMixin, models.Model):
   migration.
 * **One `PhaseField` per model** (system check `phase.E002`). A model has one lifecycle; a second one usually belongs on
   its own model. This is what lets `move()` find the field without being told.
+* **The field lives in the model's own table** (system check `phase.E003`). A model must not inherit its `PhaseField`
+  from a concrete parent model: Django would split the `UPDATE` of `move()` in two, and two concurrent transitions
+  could both succeed. An abstract parent is fine.
 
 ## Moving
 
@@ -87,7 +90,9 @@ Every model with a `PhaseField` inherits `PhaseGuardMixin` (system check `phase.
 
 * `QuerySet.update()` and `bulk_update()` bypass both the field and the mixin. Data migrations and bulk writes have to
   respect the table by hand.
-* A model can have only one `PhaseField`.
+* A model can have only one `PhaseField`, and it can't be inherited from a concrete parent model.
+* An instance loaded without its phase (`defer("status")`, `only("note")`) is saved unguarded, because there is no
+  loaded phase to compare with the database. Load the phase wherever you save.
 
 ## Actions around a transition
 

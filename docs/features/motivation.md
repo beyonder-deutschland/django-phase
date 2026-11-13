@@ -69,5 +69,6 @@ to you.
 * `QuerySet.update()` and `bulk_update()` bypass field and mixin; data migrations and bulk writes have to respect the
   table by hand.
 * Every save of an existing instance costs one extra `SELECT … FOR UPDATE`.
-* A model can have only one `PhaseField`.
+* A model can have only one `PhaseField`, and none inherited from a concrete parent model.
+* An instance loaded without its phase (`defer()`, `only()`) is saved unguarded.
 * No diagrams, no admin integration.

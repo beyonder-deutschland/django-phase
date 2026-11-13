@@ -6,5 +6,6 @@
     race is refused like any illegal transition
   * `move()` sends `pre_save` and `post_save` like `save(update_fields=…)`
   * `PhaseGuardMixin` guards every `save()` against a stale phase and lets `refresh_from_db()` past the protection
-  * System checks `phase.E001` (field without mixin) and `phase.E002` (more than one phase field per model)
+  * System checks `phase.E001` (field without mixin), `phase.E002` (more than one phase field per model) and
+    `phase.E003` (phase field inherited from a concrete parent model)
   * `PhaseGuardError` as base class for refused actions with a stable `code` and a human-readable `detail`

@@ -69,6 +69,39 @@ class CheckPhaseFieldsTest(SimpleTestCase):
         self.assertIs(errors[0].obj, Parcel)
 
     @isolate_apps("testapp")
+    def test_phase_field_inherited_from_concrete_parent(self):
+        class Parcel(PhaseGuardMixin, models.Model):  # noqa: DJ008
+            status = PhaseField(max_length=10, transitions={})
+
+            class Meta:
+                app_label = "testapp"
+
+        class ExpressParcel(Parcel):  # noqa: DJ008
+            class Meta:
+                app_label = "testapp"
+
+        with mock.patch("phase.checks.apps.get_models", return_value=[Parcel, ExpressParcel]):
+            errors = check_phase_fields()
+
+        self.assertEqual([(error.id, error.obj) for error in errors], [("phase.E003", ExpressParcel)])
+
+    @isolate_apps("testapp")
+    def test_phase_field_inherited_from_abstract_parent(self):
+        class AbstractParcel(PhaseGuardMixin, models.Model):
+            status = PhaseField(max_length=10, transitions={})
+
+            class Meta:
+                app_label = "testapp"
+                abstract = True
+
+        class Parcel(AbstractParcel):  # noqa: DJ008
+            class Meta:
+                app_label = "testapp"
+
+        with mock.patch("phase.checks.apps.get_models", return_value=[Parcel]):
+            self.assertEqual(check_phase_fields(), [])
+
+    @isolate_apps("testapp")
     def test_model_without_phase_field(self):
         class Parcel(models.Model):  # noqa: DJ008
             status = models.CharField(max_length=10)

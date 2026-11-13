@@ -237,6 +237,16 @@ class PhaseFieldTransitionTest(TestCase):
 
         self.assertEqual(order.updated_at, loaded_updated_at)
 
+    def test_move_asks_the_router_for_the_database_to_write_to(self):
+        order = Order.objects.create()
+        order._state.db = "replica"
+
+        with mock.patch("phase.fields.router.db_for_write", return_value="default") as db_for_write:
+            self.field.move(obj=order, to=Order.Status.PAID)
+
+        db_for_write.assert_called_once_with(Order, instance=order)
+        self.assertEqual(Order.objects.get(pk=order.pk).status, Order.Status.PAID)
+
     def test_move_refreshes_from_the_database_it_wrote_to(self):
         order = Order.objects.create()
 
