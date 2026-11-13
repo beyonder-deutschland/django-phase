@@ -27,9 +27,7 @@ METADATA = PackageMetadata(
     development_status=DEPLOYMENT_STATUS_BETA,
     has_migrations=False,
     main_branch="main",
-    claim=(
-        "Race-safe state machines for Django models: a protected PhaseField and transitions as one conditional UPDATE"
-    ),
+    claim="Race-safe state machines for Django",
     readme_content=ReadmeContent(uses_internationalisation=False),
     dependencies=[
         f"Django>={SUPPORTED_DJANGO_VERSIONS[0]}",

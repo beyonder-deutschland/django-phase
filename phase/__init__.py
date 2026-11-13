@@ -1,3 +1,3 @@
-"""Race-safe state machines for Django models: a protected PhaseField and transitions as one conditional UPDATE"""
+"""Race-safe state machines for Django"""
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"

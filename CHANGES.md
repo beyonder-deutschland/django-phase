@@ -1,5 +1,8 @@
 # Changelog
 
+**0.1.1** (2026-11-13)
+  * Shortened the package description
+
 **0.1.0** (2026-11-13)
   * `PhaseField`: a `CharField` carrying its transition table, protected against direct assignment and never editable
   * `move()` writes the phase, further fields and the `auto_now` fields in one conditional `UPDATE`, so the loser of a
