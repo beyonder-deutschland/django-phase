@@ -1,7 +1,7 @@
 from collections.abc import Mapping
 from types import SimpleNamespace
 
-from django.db import models, router
+from django.db import connections, models, router
 from django.db.models import signals
 from django.db.models.query_utils import DeferredAttribute
 
@@ -156,6 +156,9 @@ class PhaseFieldMixin:
         """
         Move the rows of `queryset` that are in phase `source` to phase `to` with one conditional UPDATE.
 
+        The UPDATE checks the source phase on each row it writes, also when `queryset` filters across relations. On a
+        backend that can't select from the table being updated (MySQL, MariaDB), the primary keys are read first.
+
         The UPDATE also writes `fields` and stamps the model's `auto_now` fields. Rows in another phase are skipped,
         so the return value, the number of rows moved, may be lower than the size of `queryset`. Like
         `QuerySet.update()` this sends no signals and leaves instances in memory as they are.
@@ -178,7 +181,19 @@ class PhaseFieldMixin:
                 # As in `save()` and `move()`, the current time wins over a value given for an `auto_now` field.
                 # `Field.pre_save()` only sets the attribute on the object it is given; nothing reads it back here.
                 values[field.attname] = field.pre_save(stamp, add=False)
-        return queryset.filter(**{self.attname: source}).update(**values)
+        # Filtering refuses a sliced queryset, as `update()` would.
+        candidates = queryset.filter(**{self.attname: source})
+        # The database `QuerySet.update()` would write to.
+        using = candidates._db or router.db_for_write(queryset.model, **candidates._hints)
+        # Django moves the whole WHERE of an UPDATE into a subquery once the filter joins another table, so the
+        # condition on the source phase would no longer apply to the row being written. It goes on the outer UPDATE,
+        # which selects the rows by primary key only.
+        pks = candidates.values("pk")
+        if not connections[using].features.update_can_self_select:
+            # MySQL refuses a subquery on the table being updated; the outer condition still guards every row.
+            pks = list(candidates.values_list("pk", flat=True))
+        rows = queryset.model._base_manager.using(using).filter(**{self.attname: source}, pk__in=pks)
+        return rows.update(**values)
 
     def _illegal_transition(self, *, obj: models.Model, source: Phase | None, to: Phase) -> IllegalPhaseTransitionError:
         return IllegalPhaseTransitionError(

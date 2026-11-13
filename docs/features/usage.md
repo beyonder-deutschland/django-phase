@@ -137,12 +137,21 @@ moved = move_many(
 
 * `move_many(queryset=…, source=…, to=…, **fields)` checks `source → to` against the table and raises
   `IllegalPhaseTransitionError` before touching the database. The exception's `pk` is `None`.
-* It writes with **one** conditional `UPDATE` (`queryset.filter(<field>=<source>).update(…)`), which also writes
-  `fields` and stamps the model's `auto_now` fields. Passing the phase field among `fields` raises
-  `ProtectedPhaseFieldError`.
+* It writes with **one** conditional `UPDATE`, which also writes `fields` and stamps the model's `auto_now` fields.
+  The `UPDATE` selects the rows of the queryset by primary key and checks the source phase on each written row itself:
+  `UPDATE … WHERE <field> = <source> AND pk IN (SELECT pk FROM <queryset>)`. Passing the phase field among `fields`
+  raises `ProtectedPhaseFieldError`.
+* On MySQL and MariaDB, which refuse a subquery on the table being updated, it first reads the primary keys and then
+  runs the `UPDATE` with them: two queries instead of one, still race-safe.
 * **Returns the number of rows moved.** Rows of the queryset that aren't in `source` — because they never were or
   because someone moved them in the meantime — are skipped, not an error. Compare the count if it matters.
-* It is race-safe for the same reason as `move()`: the condition on the source phase is part of the `UPDATE`.
+* It is race-safe for the same reason as `move()`: the condition on the source phase is part of the `UPDATE`. This
+  also holds for a queryset that filters across relations (`filter(customer__country="DE")`), where a plain
+  `QuerySet.update()` would move the condition into a subquery.
+* **No transaction of its own.** A single `UPDATE` is atomic by itself; inside the caller's `transaction.atomic()` it
+  commits or rolls back with everything else there.
+* **A sliced queryset is refused** with `TypeError` before anything is written, as `QuerySet.update()` does. Ordering
+  has no effect.
 * **One source per call.** The caller names the transition it means; moving rows from several phases to one target is
   one call per source.
 * **No signals.** Like `QuerySet.update()`, it sends no `pre_save` or `post_save`, and the model's `save()` isn't
@@ -150,7 +159,8 @@ moved = move_many(
   systems, failures isolated per row), loop over the rows and call `move()` for each.
 * **Instances in memory aren't updated.** An instance of a moved row keeps its old phase; a later `save()` on it is
   refused with `StalePhaseError`. Reload it to go on.
-* The rows are written on the queryset's database, through whatever manager built the queryset.
+* The rows are written on the queryset's database. Which rows are moved is decided by the queryset, including the
+  filter of the manager that built it.
 
 ## The mixin
 

@@ -1,5 +1,10 @@
 # Changelog
 
+**0.3.1** (2026-11-13)
+  * `move_many()` checks the source phase on each written row also when the queryset filters across relations, so a
+    concurrent transition is no longer overwritten; on MySQL and MariaDB it reads the primary keys first
+  * Documented that `move_many()` opens no transaction of its own and refuses a sliced queryset
+
 **0.3.0** (2026-11-13)
   * `move_many()`: moves the rows of a queryset from one phase to another with one conditional `UPDATE`, checked
     against the transition table, and returns the number of rows moved

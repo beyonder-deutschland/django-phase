@@ -4,6 +4,7 @@ from unittest import mock
 from django.db import connection
 from django.db.models import F, signals
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 
 from phase.exceptions import (
     EditablePhaseFieldError,
@@ -13,7 +14,7 @@ from phase.exceptions import (
     StalePhaseError,
 )
 from phase.fields import IntegerPhaseField, PhaseField
-from testapp.models import Invoice, Order, Shipment
+from testapp.models import Customer, Invoice, Order, Shipment
 
 NOW = datetime.datetime(2026, 11, 13, 9, 0, tzinfo=datetime.UTC)
 
@@ -526,6 +527,100 @@ class MoveManyTest(TestCase):
         )
 
         self.assertEqual(Invoice.objects.get(pk=invoice.pk).status, Invoice.Status.SENT)
+
+    def test_filter_across_a_relation(self):
+        german = Order.objects.create(customer=Customer.objects.create(country="DE"))
+        french = Order.objects.create(customer=Customer.objects.create(country="FR"))
+
+        moved = self.field.move_many(
+            queryset=Order.objects.filter(customer__country="DE"), source=Order.Status.OPEN, to=Order.Status.CANCELLED
+        )
+
+        self.assertEqual(moved, 1)
+        self.assertEqual(Order.objects.get(pk=german.pk).status, Order.Status.CANCELLED)
+        self.assertEqual(Order.objects.get(pk=french.pk).status, Order.Status.OPEN)
+
+    def test_update_checks_the_source_phase_on_the_written_row(self):
+        # With a join in the filter Django would move the source condition into a subquery, where a concurrent
+        # transition between reading and locking the row goes unnoticed.
+        Order.objects.create(customer=Customer.objects.create())
+
+        with CaptureQueriesContext(connection) as queries:
+            self.field.move_many(
+                queryset=Order.objects.filter(customer__country="DE"), source=Order.Status.OPEN, to=Order.Status.PAID
+            )
+
+        (update,) = (query["sql"] for query in queries if query["sql"].startswith("UPDATE"))
+        # Inside the subquery the table has an alias ("U0"); only the outer UPDATE names it in full.
+        self.assertIn('"testapp_order"."status" = ', update)
+
+    def test_without_self_select_skips_rows_moved_after_reading_the_keys(self):
+        moved_meanwhile = Order.objects.create()
+        still_open = Order.objects.create()
+
+        def read_keys_then_lose_a_race(pks):
+            keys = list(pks)
+            Order.objects.filter(pk=moved_meanwhile.pk).update(status=Order.Status.PAID)
+            return keys
+
+        with (
+            mock.patch.object(connection.features, "update_can_self_select", False),
+            mock.patch("phase.fields.list", side_effect=read_keys_then_lose_a_race, create=True),
+        ):
+            moved = self.field.move_many(
+                queryset=Order.objects.all(), source=Order.Status.OPEN, to=Order.Status.CANCELLED
+            )
+
+        self.assertEqual(moved, 1)
+        self.assertEqual(Order.objects.get(pk=moved_meanwhile.pk).status, Order.Status.PAID)
+        self.assertEqual(Order.objects.get(pk=still_open.pk).status, Order.Status.CANCELLED)
+
+    def test_without_self_select_reads_the_keys_first(self):
+        Order.objects.create()
+
+        with mock.patch.object(connection.features, "update_can_self_select", False), self.assertNumQueries(2):
+            moved = self.field.move_many(queryset=Order.objects.all(), source=Order.Status.OPEN, to=Order.Status.PAID)
+
+        self.assertEqual(moved, 1)
+
+    def test_refuses_a_sliced_queryset_before_writing(self):
+        Order.objects.create()
+
+        with self.assertNumQueries(0), self.assertRaises(TypeError):
+            self.field.move_many(queryset=Order.objects.all()[:1], source=Order.Status.OPEN, to=Order.Status.PAID)
+
+        self.assertEqual(Order.objects.get().status, Order.Status.OPEN)
+
+    def test_ordered_queryset(self):
+        Order.objects.create()
+        Order.objects.create()
+
+        moved = self.field.move_many(
+            queryset=Order.objects.order_by("-pk"), source=Order.Status.OPEN, to=Order.Status.PAID
+        )
+
+        self.assertEqual(moved, 2)
+
+    def test_ignores_default_manager_filter_for_rows_the_queryset_selects(self):
+        shipment = Shipment.objects.create(archived=True)
+
+        moved = Shipment._meta.get_field("status").move_many(
+            queryset=Shipment._base_manager.all(), source="packed", to="sent"
+        )
+
+        self.assertEqual(moved, 1)
+        self.assertEqual(Shipment._base_manager.get(pk=shipment.pk).status, "sent")
+
+    def test_writes_to_the_database_of_the_queryset(self):
+        Order.objects.create()
+
+        with mock.patch("phase.fields.router.db_for_write") as db_for_write:
+            moved = self.field.move_many(
+                queryset=Order.objects.using("default"), source=Order.Status.OPEN, to=Order.Status.PAID
+            )
+
+        db_for_write.assert_not_called()
+        self.assertEqual(moved, 1)
 
 
 class PhaseLabelTest(TestCase):

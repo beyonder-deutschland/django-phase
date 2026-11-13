@@ -4,6 +4,13 @@ from phase.fields import IntegerPhaseField, PhaseField
 from phase.mixins.phase_guard import PhaseGuardMixin
 
 
+class Customer(models.Model):
+    country = models.CharField(max_length=2, default="DE")
+
+    def __str__(self) -> str:
+        return f"Customer {self.pk}"
+
+
 class Order(PhaseGuardMixin, models.Model):
     class Status(models.TextChoices):
         OPEN = "open"
@@ -20,6 +27,7 @@ class Order(PhaseGuardMixin, models.Model):
             Status.PAID: (Status.SHIPPED,),
         },
     )
+    customer = models.ForeignKey(Customer, null=True, blank=True, on_delete=models.CASCADE)
     note = models.CharField(max_length=100, blank=True, default="")
     transition_count = models.PositiveIntegerField(default=0)
     updated_at = models.DateTimeField(auto_now=True)
