@@ -5,8 +5,10 @@
 * `move()` writes phase and further fields in **one** conditional `UPDATE`, so of two concurrent transitions from the
   same phase exactly one succeeds
 * Every `save()` is guarded against a stale phase, so it can't silently undo a concurrent transition
-* Migrations see a plain `CharField` and never import `phase`
-* System checks catch a missing mixin, a second phase field or one inherited from a concrete parent model
+* Phases as strings (`PhaseField`) or numbers (`IntegerPhaseField`); migrations see a plain Django field and never
+  import `phase`
+* System checks catch a missing mixin, a second phase field, a nullable one or one inherited from a concrete parent
+  model
 * `PhaseGuardError` gives refused actions a stable `code` for machines and a `detail` for humans
 * Overrides no private Django method
 

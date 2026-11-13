@@ -39,11 +39,48 @@ class Order(PhaseGuardMixin, models.Model):
   `EditablePhaseFieldError`. List it in an admin's `readonly_fields` to show it on the detail page.
 * Migrations see a plain `CharField`, so no migration depends on `phase`. Changing the transition table needs no
   migration.
+* **`null=True` is refused** (system check `phase.E004`). "No value" is not a phase: a refused transition reports a row
+  that doesn't exist as `source=None`, and a lifecycle that starts in "nothing" hides its first state from the
+  transition table. Give that state a phase of its own, e.g. `OPEN`.
 * **One `PhaseField` per model** (system check `phase.E002`). A model has one lifecycle; a second one usually belongs on
   its own model. This is what lets `move()` find the field without being told.
 * **The field lives in the model's own table** (system check `phase.E003`). A model must not inherit its `PhaseField`
   from a concrete parent model: Django would split the `UPDATE` of `move()` in two, and two concurrent transitions
   could both succeed. An abstract parent is fine.
+
+## Phases stored as numbers
+
+A status kept as `IntegerChoices` uses `IntegerPhaseField`. It behaves like `PhaseField` in every respect; only the
+column differs.
+
+```python
+from phase.fields import IntegerPhaseField
+
+
+class Invoice(PhaseGuardMixin, models.Model):
+    class Status(models.IntegerChoices):
+        DRAFT = 1, "Draft"
+        SENT = 2, "Sent"
+        PAID = 3, "Paid"
+
+    status = IntegerPhaseField(
+        choices=Status.choices,
+        default=Status.DRAFT,
+        transitions={
+            Status.DRAFT: (Status.SENT,),
+            Status.SENT: (Status.PAID,),
+        },
+    )
+```
+
+* **The column is always a `PositiveSmallIntegerField`**, and migrations see exactly that. A lifecycle has a handful of
+  phases, so there is one integer field instead of one per Django integer type: a negative phase or one beyond 32767
+  has no meaning, and a single type keeps the choice out of every model.
+* A model that already stores its status in a `PositiveSmallIntegerField` switches without touching the data. A status
+  in another integer type needs a migration to `PositiveSmallIntegerField` first.
+* **Messages name a phase by its choice label**, followed by the stored value: `cannot change from 'Draft' (1) to
+  'Paid' (3)`. A number alone doesn't tell what it means. A string phase names itself and is shown as stored. The
+  exception attributes (`source`, `target`, `phases`) always hold the stored values.
 
 ## Moving
 
@@ -90,7 +127,10 @@ Every model with a `PhaseField` inherits `PhaseGuardMixin` (system check `phase.
 
 * `QuerySet.update()` and `bulk_update()` bypass both the field and the mixin. Data migrations and bulk writes have to
   respect the table by hand.
-* A model can have only one `PhaseField`, and it can't be inherited from a concrete parent model.
+* A model can have only one phase field, it can't be inherited from a concrete parent model, and it can't be
+  nullable.
+* Phases are strings (`PhaseField`) or small positive integers (`IntegerPhaseField`). Other column types aren't
+  supported.
 * An instance loaded without its phase (`defer("status")`, `only("note")`) is saved unguarded, because there is no
   loaded phase to compare with the database. Load the phase wherever you save.
 

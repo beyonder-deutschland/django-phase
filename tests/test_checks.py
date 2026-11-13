@@ -7,7 +7,7 @@ from django.test import SimpleTestCase
 from django.test.utils import isolate_apps
 
 from phase.checks import check_phase_fields
-from phase.fields import PhaseField
+from phase.fields import IntegerPhaseField, PhaseField
 from phase.mixins.phase_guard import PhaseGuardMixin
 
 
@@ -84,6 +84,20 @@ class CheckPhaseFieldsTest(SimpleTestCase):
             errors = check_phase_fields()
 
         self.assertEqual([(error.id, error.obj) for error in errors], [("phase.E003", ExpressParcel)])
+
+    @isolate_apps("testapp")
+    def test_phase_field_allowing_null(self):
+        class Parcel(PhaseGuardMixin, models.Model):  # noqa: DJ008
+            status = IntegerPhaseField(null=True, transitions={})
+
+            class Meta:
+                app_label = "testapp"
+
+        with mock.patch("phase.checks.apps.get_models", return_value=[Parcel]):
+            errors = check_phase_fields()
+
+        self.assertEqual([error.id for error in errors], ["phase.E004"])
+        self.assertIs(errors[0].obj, Parcel)
 
     @isolate_apps("testapp")
     def test_phase_field_inherited_from_abstract_parent(self):

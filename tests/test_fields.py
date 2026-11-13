@@ -12,8 +12,8 @@ from phase.exceptions import (
     ProtectedPhaseFieldError,
     StalePhaseError,
 )
-from phase.fields import PhaseField
-from testapp.models import Order, Shipment
+from phase.fields import IntegerPhaseField, PhaseField
+from testapp.models import Invoice, Order, Shipment
 
 NOW = datetime.datetime(2026, 11, 13, 9, 0, tzinfo=datetime.UTC)
 
@@ -283,3 +283,112 @@ class PhaseFieldTransitionTest(TestCase):
         Shipment._meta.get_field("status").move(obj=shipment, to="sent")
 
         self.assertEqual(shipment.status, "sent")
+
+
+class IntegerPhaseFieldTest(TestCase):
+    def setUp(self):
+        self.field = Invoice._meta.get_field("status")
+
+    def test_targets_must_be_tuples(self):
+        with self.assertRaisesMessage(InvalidTransitionTableError, "Targets of phase '1' must be a tuple"):
+            IntegerPhaseField(transitions={1: 2})
+
+    def test_field_is_never_editable(self):
+        self.assertFalse(self.field.editable)
+
+    def test_deconstruct_returns_plain_positive_small_integer_field(self):
+        _, path, _, kwargs = self.field.deconstruct()
+
+        self.assertEqual(path, "django.db.models.PositiveSmallIntegerField")
+        self.assertNotIn("transitions", kwargs)
+        self.assertNotIn("editable", kwargs)
+
+    def test_clone_keeps_transitions(self):
+        clone = self.field.clone()
+
+        self.assertIsInstance(clone, IntegerPhaseField)
+        self.assertEqual(clone.transitions, self.field.transitions)
+
+    def test_direct_assignment_is_refused(self):
+        invoice = Invoice.objects.create()
+
+        with self.assertRaises(ProtectedPhaseFieldError):
+            invoice.status = Invoice.Status.SENT
+
+        self.assertEqual(invoice.status, Invoice.Status.DRAFT)
+
+    def test_full_clean_of_saved_instance(self):
+        invoice = Invoice.objects.create()
+
+        invoice.full_clean()
+
+        self.assertEqual(invoice.status, Invoice.Status.DRAFT)
+
+    def test_targets_of_instance_loaded_from_database(self):
+        invoice = Invoice.objects.get(pk=Invoice.objects.create().pk)
+
+        self.assertEqual(self.field.targets(obj=invoice), (Invoice.Status.SENT, Invoice.Status.VOID))
+        self.assertTrue(self.field.can_transition(obj=invoice, to=Invoice.Status.VOID))
+
+    def test_move_writes_phase_and_fields(self):
+        invoice = Invoice.objects.create()
+
+        self.field.move(obj=invoice, to=Invoice.Status.SENT, note="sent by mail")
+
+        stored = Invoice.objects.get(pk=invoice.pk)
+        self.assertEqual(invoice.status, Invoice.Status.SENT)
+        self.assertEqual(stored.status, Invoice.Status.SENT)
+        self.assertEqual(stored.note, "sent by mail")
+
+    def test_refused_move_names_phases_by_label(self):
+        invoice = Invoice.objects.create()
+
+        with self.assertRaisesMessage(
+            IllegalPhaseTransitionError,
+            f"testapp.Invoice ID #{invoice.pk} cannot change from 'Draft' (1) to 'Paid' (3).",
+        ) as context:
+            self.field.move(obj=invoice, to=Invoice.Status.PAID)
+
+        self.assertEqual(context.exception.source, Invoice.Status.DRAFT)
+        self.assertEqual(context.exception.target, Invoice.Status.PAID)
+
+    def test_move_refuses_the_loser_of_a_race(self):
+        invoice = Invoice.objects.create()
+        self.field.move(obj=Invoice.objects.get(pk=invoice.pk), to=Invoice.Status.VOID)
+
+        with self.assertRaisesMessage(IllegalPhaseTransitionError, "cannot change from 'Void' (4) to 'Sent' (2)."):
+            self.field.move(obj=invoice, to=Invoice.Status.SENT)
+
+        self.assertEqual(Invoice.objects.get(pk=invoice.pk).status, Invoice.Status.VOID)
+
+    def test_move_of_deleted_row_names_target_by_label(self):
+        invoice = Invoice.objects.create()
+        Invoice.objects.filter(pk=invoice.pk).delete()
+
+        with self.assertRaisesMessage(
+            IllegalPhaseTransitionError, "doesn't exist in the database and cannot change to 'Sent' (2)."
+        ):
+            self.field.move(obj=invoice, to=Invoice.Status.SENT)
+
+    def test_stale_save_names_phase_by_label(self):
+        invoice = Invoice.objects.create()
+        self.field.move(obj=Invoice.objects.get(pk=invoice.pk), to=Invoice.Status.VOID)
+
+        with self.assertRaisesMessage(StalePhaseError, "no longer has status='Draft' (1) in the database") as context:
+            invoice.save()
+
+        self.assertEqual(context.exception.phases, {"status": Invoice.Status.DRAFT})
+
+
+class PhaseLabelTest(TestCase):
+    def test_number_with_choice(self):
+        self.assertEqual(Invoice._meta.get_field("status").label(Invoice.Status.PAID), "Paid")
+
+    def test_number_without_choice(self):
+        self.assertIsNone(IntegerPhaseField(transitions={}).label(7))
+
+    def test_string_names_itself(self):
+        self.assertIsNone(Order._meta.get_field("status").label(Order.Status.PAID))
+
+    def test_missing_row(self):
+        self.assertIsNone(Invoice._meta.get_field("status").label(None))

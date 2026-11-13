@@ -1,7 +1,7 @@
 from django.db import models, router, transaction
 
 from phase.exceptions import StalePhaseError
-from phase.fields import REFRESHING_FLAG, PhaseField, get_phase_fields, is_expression
+from phase.fields import REFRESHING_FLAG, PhaseFieldMixin, get_phase_fields, is_expression
 
 # The arguments of `Model.save()` in positional order.
 SAVE_ARGUMENTS = ("force_insert", "force_update", "using", "update_fields")
@@ -9,17 +9,17 @@ SAVE_ARGUMENTS = ("force_insert", "force_update", "using", "update_fields")
 
 class PhaseGuardMixin(models.Model):
     """
-    Companion of `PhaseField`: lets reloads past the field's write protection and guards every save against a stale
+    Companion of a phase field: lets reloads past the field's write protection and guards every save against a stale
     phase.
 
     A save of an instance whose phase no longer matches the database would silently undo a concurrent transition, so
-    it is refused. Because a `PhaseField` only changes through `move()`, the in-memory value always is the value last
+    it is refused. Because a phase field only changes through `move()`, the in-memory value always is the value last
     read from or written to the database, and comparing it with a locked row is enough.
 
     This also covers a new instance with an explicit primary key: Django tries an UPDATE first, which would otherwise
     overwrite the phase of an existing row without a transition.
 
-    System check `phase.E001` makes sure every model with a `PhaseField` inherits this mixin.
+    System check `phase.E001` makes sure every model with a phase field inherits this mixin.
     """
 
     class Meta:
@@ -49,12 +49,18 @@ class PhaseGuardMixin(models.Model):
                 super().save(*args, **kwargs)
                 return
             if stored_phases != loaded_phases:
-                raise StalePhaseError(model_name=self._meta.label, pk=self.pk, phases=loaded_phases)
+                raise StalePhaseError(
+                    model_name=self._meta.label, pk=self.pk, phases=loaded_phases, labels=self._phase_labels()
+                )
             super().save(*args, **kwargs)
 
     @classmethod
-    def phase_fields(cls) -> tuple[PhaseField, ...]:
+    def phase_fields(cls) -> tuple[PhaseFieldMixin, ...]:
         return get_phase_fields(model=cls)
+
+    def _phase_labels(self) -> dict[str, str]:
+        labels = {field.attname: field.label(self.__dict__.get(field.attname)) for field in self.phase_fields()}
+        return {attname: label for attname, label in labels.items() if label is not None}
 
     def refresh_from_db(self, *args: object, **kwargs: object) -> None:
         self.__dict__[REFRESHING_FLAG] = True

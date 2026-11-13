@@ -10,13 +10,15 @@ from phase.mixins.phase_guard import PhaseGuardMixin
 @checks.register(checks.Tags.models)
 def check_phase_fields(app_configs: list[AppConfig] | None = None, **kwargs: object) -> list[checks.Error]:
     """
-    Every model with a PhaseField inherits PhaseGuardMixin, has exactly one PhaseField and stores it in its own table.
+    Every model with a phase field inherits PhaseGuardMixin, has exactly one phase field, stores it in its own table
+    and doesn't allow NULL in it.
 
     Without the mixin the model can't be reloaded, because the field refuses the second assignment. With two phase
     fields `phase.transitions.move()` couldn't tell which one to move. A phase field in the table of a concrete parent
     makes Django split the UPDATE of `move()` into a SELECT of the primary keys and an UPDATE without the condition on
-    the phase, so two concurrent transitions could both succeed. Proxy models share their concrete model's fields and
-    are reported there.
+    the phase, so two concurrent transitions could both succeed. NULL can't be a phase, because a refused transition
+    reports a row that doesn't exist as "no phase". Proxy models share their concrete model's fields and are reported
+    there.
     """
     if app_configs is None:
         models = apps.get_models()
@@ -52,6 +54,15 @@ def check_phase_fields(app_configs: list[AppConfig] | None = None, **kwargs: obj
                     hint="Make the parent abstract, or give the lifecycle its own model without concrete children.",
                     obj=model,
                     id="phase.E003",
+                )
+            )
+        if any(field.null for field in phase_fields):
+            errors.append(
+                checks.Error(
+                    f"{model._meta.label} has a PhaseField that allows NULL.",
+                    hint="Give the state without a value a phase of its own, e.g. 'open'.",
+                    obj=model,
+                    id="phase.E004",
                 )
             )
     return errors

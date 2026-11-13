@@ -27,6 +27,32 @@ class IllegalPhaseTransitionErrorTest(SimpleTestCase):
 
         self.assertEqual(str(error), "shop.Order ID #7 cannot change from 'open' to 'shipped'.")
 
+    def test_message_with_labels(self):
+        error = IllegalPhaseTransitionError(
+            model_name="shop.Order", pk=7, source=1, target=3, source_label="Open", target_label="Shipped"
+        )
+
+        self.assertEqual(str(error), "shop.Order ID #7 cannot change from 'Open' (1) to 'Shipped' (3).")
+
+    def test_message_of_missing_row_with_label(self):
+        error = IllegalPhaseTransitionError(
+            model_name="shop.Order", pk=7, source=None, target=3, target_label="Shipped"
+        )
+
+        self.assertEqual(
+            str(error), "shop.Order ID #7 doesn't exist in the database and cannot change to 'Shipped' (3)."
+        )
+
+    def test_labels_survive_pickling(self):
+        error = IllegalPhaseTransitionError(
+            model_name="shop.Order", pk=7, source=1, target=3, source_label="Open", target_label="Shipped"
+        )
+
+        restored = pickle.loads(pickle.dumps(error))
+
+        self.assertEqual((restored.source, restored.target), (1, 3))
+        self.assertEqual(str(restored), str(error))
+
     def test_survives_pickling(self):
         error = IllegalPhaseTransitionError(model_name="shop.Order", pk=7, source="open", target="shipped")
 
@@ -45,6 +71,21 @@ class StalePhaseErrorTest(SimpleTestCase):
         self.assertEqual(
             str(error), "shop.Order ID #7 no longer has status='open' in the database; reload it before saving."
         )
+
+    def test_message_with_label(self):
+        error = StalePhaseError(model_name="shop.Order", pk=7, phases={"status": 1}, labels={"status": "Open"})
+
+        self.assertEqual(
+            str(error), "shop.Order ID #7 no longer has status='Open' (1) in the database; reload it before saving."
+        )
+
+    def test_label_survives_pickling(self):
+        error = StalePhaseError(model_name="shop.Order", pk=7, phases={"status": 1}, labels={"status": "Open"})
+
+        restored = pickle.loads(pickle.dumps(error))
+
+        self.assertEqual(restored.labels, {"status": "Open"})
+        self.assertEqual(str(restored), str(error))
 
     def test_survives_pickling(self):
         error = StalePhaseError(model_name="shop.Order", pk=7, phases={"status": "open"})

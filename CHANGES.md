@@ -1,5 +1,11 @@
 # Changelog
 
+**0.2.0** (2026-11-13)
+  * `IntegerPhaseField`: a phase stored as a number, e.g. the values of an `IntegerChoices`, in a
+    `PositiveSmallIntegerField`
+  * Messages of `IllegalPhaseTransitionError` and `StalePhaseError` name a numeric phase by its choice label
+  * System check `phase.E004` refuses a phase field with `null=True`
+
 **0.1.1** (2026-11-13)
   * Shortened the package description
 

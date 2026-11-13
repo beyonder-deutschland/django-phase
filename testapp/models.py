@@ -1,6 +1,6 @@
 from django.db import models
 
-from phase.fields import PhaseField
+from phase.fields import IntegerPhaseField, PhaseField
 from phase.mixins.phase_guard import PhaseGuardMixin
 
 
@@ -43,3 +43,26 @@ class Shipment(PhaseGuardMixin, models.Model):
 
     def __str__(self) -> str:
         return f"Shipment {self.pk}: {self.status}"
+
+
+class Invoice(PhaseGuardMixin, models.Model):
+    """Phase stored as a number."""
+
+    class Status(models.IntegerChoices):
+        DRAFT = 1, "Draft"
+        SENT = 2, "Sent"
+        PAID = 3, "Paid"
+        VOID = 4, "Void"
+
+    status = IntegerPhaseField(
+        choices=Status.choices,
+        default=Status.DRAFT,
+        transitions={
+            Status.DRAFT: (Status.SENT, Status.VOID),
+            Status.SENT: (Status.PAID,),
+        },
+    )
+    note = models.CharField(max_length=100, blank=True, default="")
+
+    def __str__(self) -> str:
+        return f"Invoice {self.pk}: {self.status}"

@@ -12,6 +12,9 @@ from phase.exceptions import (
     ProtectedPhaseFieldError,
 )
 
+# The value of a phase as the database stores it.
+Phase = str | int
+
 # Set on the instance while `PhaseGuardMixin.refresh_from_db()` runs, so the reload may overwrite the phase.
 REFRESHING_FLAG = "_phase_field_refreshing"
 
@@ -29,7 +32,7 @@ class ProtectedPhaseDescriptor(DeferredAttribute):
     `Model.clean_fields()` and when it writes back the columns an INSERT returned.
     """
 
-    def __set__(self, instance: models.Model, value: str) -> None:
+    def __set__(self, instance: models.Model, value: object) -> None:
         if (
             self.field.attname in instance.__dict__
             and not instance.__dict__.get(REFRESHING_FLAG)
@@ -45,9 +48,9 @@ def is_expression(value: object) -> bool:
     return hasattr(value, "resolve_expression")
 
 
-class PhaseField(models.CharField):
+class PhaseFieldMixin:
     """
-    A CharField whose value only changes along `transitions`, via `move()`.
+    What `PhaseField` and `IntegerPhaseField` share: a value that only changes along `transitions`, via `move()`.
 
     A phase missing from `transitions` is final. `move()` writes with a conditional UPDATE on the source phase, so two
     concurrent transitions from the same phase cannot both succeed: the second one updates no row and is rejected like
@@ -57,9 +60,11 @@ class PhaseField(models.CharField):
     """
 
     descriptor_class = ProtectedPhaseDescriptor
+    # The plain Django field migrations see.
+    django_field_path: str
 
-    def __init__(self, *args: object, transitions: Mapping[str, tuple[str, ...]], **kwargs: object) -> None:
-        # `(DECLINED)` without a trailing comma is a plain string, and `in` on a string matches substrings.
+    def __init__(self, *args: object, transitions: Mapping[Phase, tuple[Phase, ...]], **kwargs: object) -> None:
+        # `(DECLINED)` without a trailing comma is the phase itself, and `in` on a string matches substrings.
         for source, targets in transitions.items():
             if not isinstance(targets, tuple):
                 raise InvalidTransitionTableError(source=source)
@@ -70,24 +75,35 @@ class PhaseField(models.CharField):
         super().__init__(*args, **kwargs)
 
     def deconstruct(self) -> tuple:
-        # Migrations see a plain CharField: the table and the editability are behaviour, not schema, and must not pin
-        # migrations to phase.
+        # Migrations see the plain Django field: the table and the editability are behaviour, not schema, and must
+        # not pin migrations to phase.
         name, _, args, kwargs = super().deconstruct()
         kwargs.pop("editable", None)
-        return name, "django.db.models.CharField", args, kwargs
+        return name, self.django_field_path, args, kwargs
 
-    def clone(self) -> "PhaseField":
+    def clone(self) -> "PhaseFieldMixin":
         # Field.clone() rebuilds from deconstruct(), which drops the table on purpose; the clone still needs it.
         _, _, args, kwargs = self.deconstruct()
         return self.__class__(*args, transitions=self.transitions, **kwargs)
 
-    def targets(self, *, obj: models.Model) -> tuple[str, ...]:
+    def label(self, phase: Phase | None) -> str | None:
+        """
+        The choice label of a phase that isn't readable by itself, e.g. "Paid" for 2.
+
+        A string phase names itself and has no label here, so messages show the stored value.
+        """
+        if phase is None or isinstance(phase, str):
+            return None
+        label = dict(self.flatchoices).get(phase)
+        return None if label is None else str(label)
+
+    def targets(self, *, obj: models.Model) -> tuple[Phase, ...]:
         return self.transitions.get(getattr(obj, self.attname), ())
 
-    def can_transition(self, *, obj: models.Model, to: str) -> bool:
+    def can_transition(self, *, obj: models.Model, to: Phase) -> bool:
         return to in self.targets(obj=obj)
 
-    def move(self, *, obj: models.Model, to: str, **fields: object) -> None:
+    def move(self, *, obj: models.Model, to: Phase, **fields: object) -> None:
         """
         Move `obj` to phase `to` and write `fields` and the model's `auto_now` fields in the same UPDATE.
 
@@ -109,7 +125,7 @@ class PhaseField(models.CharField):
             if source is not None:
                 obj.__dict__[self.attname] = source
         if to not in self.transitions.get(source, ()):
-            raise IllegalPhaseTransitionError(model_name=obj._meta.label, pk=obj.pk, source=source, target=to)
+            raise self._illegal_transition(obj=obj, source=source, to=to)
 
         written_fields = self._written_fields(obj=obj, fields=fields)
         update_fields = frozenset(field.name for field in written_fields)
@@ -128,16 +144,21 @@ class PhaseField(models.CharField):
             raise
         if not updated_rows:
             self._restore(obj=obj, loaded_state=loaded_state)
-            raise IllegalPhaseTransitionError(
-                model_name=obj._meta.label,
-                pk=obj.pk,
-                source=rows.values_list(self.attname, flat=True).first(),
-                target=to,
-            )
+            raise self._illegal_transition(obj=obj, source=rows.values_list(self.attname, flat=True).first(), to=to)
 
         obj.refresh_from_db(using=using, fields=[field.attname for field in written_fields])
         signals.post_save.send(
             sender=model, instance=obj, created=False, update_fields=update_fields, raw=False, using=using
+        )
+
+    def _illegal_transition(self, *, obj: models.Model, source: Phase | None, to: Phase) -> IllegalPhaseTransitionError:
+        return IllegalPhaseTransitionError(
+            model_name=obj._meta.label,
+            pk=obj.pk,
+            source=source,
+            target=to,
+            source_label=self.label(source),
+            target_label=self.label(to),
         )
 
     def _written_fields(self, *, obj: models.Model, fields: Mapping[str, object]) -> list[models.Field]:
@@ -158,13 +179,29 @@ class PhaseField(models.CharField):
         obj._state.fields_cache = fields_cache
 
 
-def get_phase_fields(*, model: type[models.Model]) -> tuple[PhaseField, ...]:
-    return tuple(field for field in model._meta.concrete_fields if isinstance(field, PhaseField))
+class PhaseField(PhaseFieldMixin, models.CharField):
+    """A phase stored as a string, e.g. the values of a `TextChoices`."""
+
+    django_field_path = "django.db.models.CharField"
 
 
-def get_phase_field(*, model: type[models.Model]) -> PhaseField:
+class IntegerPhaseField(PhaseFieldMixin, models.PositiveSmallIntegerField):
     """
-    Return the one `PhaseField` of `model`.
+    A phase stored as a number, e.g. the values of an `IntegerChoices`.
+
+    The column is a `PositiveSmallIntegerField`: phases are a handful of values counted from zero.
+    """
+
+    django_field_path = "django.db.models.PositiveSmallIntegerField"
+
+
+def get_phase_fields(*, model: type[models.Model]) -> tuple[PhaseFieldMixin, ...]:
+    return tuple(field for field in model._meta.concrete_fields if isinstance(field, PhaseFieldMixin))
+
+
+def get_phase_field(*, model: type[models.Model]) -> PhaseFieldMixin:
+    """
+    Return the one phase field of `model`.
 
     A model has at most one phase field (system check `phase.E002`), so callers never name the field.
     """
