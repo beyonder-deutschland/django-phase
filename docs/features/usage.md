@@ -167,10 +167,15 @@ moved = move_many(
 Every model with a phase field inherits `PhaseGuardMixin` (system check `phase.E001`), listed before `models.Model`:
 
 * `refresh_from_db()` may overwrite the protected field, because it writes what the database holds.
-* **Every `save()` is guarded against a stale phase.** Inside a transaction it locks the row with `select_for_update`
-  and refuses the save with `StalePhaseError` if the phase in the database differs from the instance. This also covers
-  saves that don't touch the phase (`save(update_fields=["note"])`), which would otherwise silently undo a concurrent
-  transition.
+* **Every `save()` is guarded against a stale phase.** It locks the row with `select_for_update` and refuses the save
+  with `StalePhaseError` if the phase in the database differs from the instance. This also covers saves that don't
+  touch the phase (`save(update_fields=["note"])`), which would otherwise silently undo a concurrent transition.
+* **Inside a transaction the guard adds no savepoint.** It runs its `SELECT` in the caller's transaction, which keeps
+  the row lock until it ends. A caught `StalePhaseError` leaves the transaction usable. An error in the save itself
+  leaves it as the save of a plain model does: a database error such as `IntegrityError` marks the transaction for
+  rollback, so a caller that wants to catch it and go on wraps the save in its own `transaction.atomic()`.
+* **In autocommit the guard opens a transaction** around the check and the write. It is rolled back when the save is
+  refused or fails, including a failing `post_save` receiver.
 * A **new instance with an explicit primary key** is checked the same way when a row with that key exists, because
   Django then updates that row instead of inserting.
 * **A `save()` override on the model has to call `super().save()`**, as any override should. The guard lives in the
@@ -179,9 +184,13 @@ Every model with a phase field inherits `PhaseGuardMixin` (system check `phase.E
 
 ### What the guard costs
 
-A guarded save runs three statements on top of its `UPDATE`: the `SELECT … FOR UPDATE` and the transaction around it.
-Inside a transaction that is `SAVEPOINT` and `RELEASE SAVEPOINT`, in autocommit `BEGIN` and `COMMIT`. Tests that count
-queries (`assertNumQueries`) see all three, because a `TestCase` always runs in a transaction.
+Inside a transaction a guarded save runs one statement on top of its `UPDATE`: the `SELECT … FOR UPDATE`. That is the
+case in a request with `ATOMIC_REQUESTS`, inside `transaction.atomic()` and in a `TestCase`, so tests that count
+queries (`assertNumQueries`) see one more query per guarded save.
+
+In autocommit it runs three: the `SELECT … FOR UPDATE` and the `BEGIN` and `COMMIT` of the transaction around it.
+
+The lock taken by the `SELECT` lasts until the surrounding transaction ends, also when the save was refused.
 
 Only the save of an existing instance with a loaded phase is guarded. An `INSERT` (`create()`, a new instance without a
 primary key, `force_insert=True`) and a save with empty `update_fields` cost nothing extra.
@@ -189,7 +198,8 @@ primary key, `force_insert=True`) and a save with empty `update_fields` cost not
 ## Limits
 
 * `QuerySet.update()` and `bulk_update()` bypass both the field and the mixin. Use `move_many()` for bulk transitions;
-  data migrations and other bulk writes have to respect the table by hand.
+  data migrations and other bulk writes have to respect the table by hand. So does
+  `bulk_create(update_conflicts=True)` with the phase among `update_fields`, see "Working with other parts of Django".
 * A model can have only one phase field, it can't be inherited from a concrete parent model, and it can't be
   nullable.
 * Phases are strings (`PhaseField`) or small positive integers (`IntegerPhaseField`). Other column types aren't

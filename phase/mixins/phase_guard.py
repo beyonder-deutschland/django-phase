@@ -41,18 +41,27 @@ class PhaseGuardMixin(models.Model):
             return
 
         using = options.get("using") or router.db_for_write(type(self), instance=self)
-        with transaction.atomic(using=using):
-            stored_phases = (
-                type(self)._base_manager.using(using).select_for_update().filter(pk=self.pk).values(*loaded_phases)
-            ).first()
-            if stored_phases is None and self._state.adding:
-                super().save(*args, **kwargs)
-                return
-            if stored_phases != loaded_phases:
-                raise StalePhaseError(
-                    model_name=self._meta.label, pk=self.pk, phases=loaded_phases, labels=self._phase_labels()
-                )
-            super().save(*args, **kwargs)
+        if transaction.get_autocommit(using=using):
+            # A row lock ends with its transaction, so in autocommit one has to span the check and the write.
+            with transaction.atomic(using=using):
+                self._save_checked(using=using, loaded_phases=loaded_phases, args=args, kwargs=kwargs)
+        else:
+            # The open transaction keeps the lock until it ends. Nothing wraps the save here, so an error in it leaves
+            # that transaction in the state a save of a plain model would, and a caught `StalePhaseError` leaves it
+            # usable.
+            self._save_checked(using=using, loaded_phases=loaded_phases, args=args, kwargs=kwargs)
+
+    def _save_checked(self, *, using: str, loaded_phases: dict[str, object], args: tuple, kwargs: dict) -> None:
+        """Lock the row, compare its phases with the loaded ones and save. Runs inside a transaction."""
+        stored_phases = (
+            type(self)._base_manager.using(using).select_for_update().filter(pk=self.pk).values(*loaded_phases)
+        ).first()
+        is_new_row = stored_phases is None and self._state.adding
+        if not is_new_row and stored_phases != loaded_phases:
+            raise StalePhaseError(
+                model_name=self._meta.label, pk=self.pk, phases=loaded_phases, labels=self._phase_labels()
+            )
+        super().save(*args, **kwargs)
 
     @classmethod
     def phase_fields(cls) -> tuple[PhaseFieldMixin, ...]:

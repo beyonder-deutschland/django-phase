@@ -68,7 +68,8 @@ to you.
   `refresh_from_db()`, `full_clean()`, `db_default`, pickling of the exceptions — are covered by tests.
 * `QuerySet.update()` and `bulk_update()` bypass field and mixin; data migrations and bulk writes other than
   `move_many()` have to respect the table by hand. `move_many()` sends no signals.
-* Every save of an existing instance costs one extra `SELECT … FOR UPDATE`.
+* Every save of an existing instance costs one extra `SELECT … FOR UPDATE`, in autocommit also a transaction around it.
 * A model can have only one `PhaseField`, and none inherited from a concrete parent model.
 * An instance loaded without its phase (`defer()`, `only()`) is saved unguarded.
-* No diagrams, no admin integration.
+* No diagrams, no admin integration, no history of transitions. "Scope" lists what the package leaves out on purpose
+  and what may follow.

@@ -11,6 +11,8 @@ django-phase
    features/setup.md
    features/usage.md
    features/refused_actions.md
+   features/integration.md
+   features/scope.md
    features/changelog.rst
 
 Indices and tables

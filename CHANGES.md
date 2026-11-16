@@ -1,5 +1,14 @@
 # Changelog
 
+**0.4.0** (2026-11-16)
+  * Inside a transaction a guarded `save()` runs one extra statement, the `SELECT … FOR UPDATE`, without a savepoint
+    around it
+  * Inside a transaction a database error in a guarded `save()`, e.g. `IntegrityError`, marks the transaction for
+    rollback, as the save of a plain model does; wrap the save in its own `transaction.atomic()` to catch it and go on
+  * Documented how `phase` works with audit logs, `bulk_create()`, `get_or_create()` and `update_or_create()`, Django
+    REST framework and the admin
+  * Documented what the package leaves out on purpose and what may follow
+
 **0.3.1** (2026-11-13)
   * `move_many()` checks the source phase on each written row also when the queryset filters across relations, so a
     concurrent transition is no longer overwritten; on MySQL and MariaDB it reads the primary keys first

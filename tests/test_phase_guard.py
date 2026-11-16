@@ -2,12 +2,16 @@ import warnings
 from unittest import skipIf
 
 import django
-from django.test import TestCase
+from django.db import IntegrityError, connection, transaction
+from django.db.models import signals
+from django.db.transaction import TransactionManagementError
+from django.test import TestCase, TransactionTestCase
+from django.test.utils import CaptureQueriesContext
 
 from phase.exceptions import StalePhaseError
 from phase.fields import REFRESHING_FLAG
 from phase.transitions import move
-from testapp.models import Order, Shipment
+from testapp.models import Customer, Order, Shipment
 
 
 class PhaseGuardMixinSaveTest(TestCase):
@@ -142,3 +146,117 @@ class PhaseGuardMixinRefreshTest(TestCase):
 
     def test_phase_fields(self):
         self.assertEqual(Order.phase_fields(), (Order._meta.get_field("status"),))
+
+
+class PhaseGuardMixinOpenTransactionTest(TestCase):
+    """A `TestCase` runs in a transaction, as a request with `ATOMIC_REQUESTS` does."""
+
+    def test_guarded_save_adds_one_query(self):
+        order = Order.objects.create()
+        order.note = "gift wrap"
+
+        with CaptureQueriesContext(connection) as queries:
+            order.save()
+
+        statements = [query["sql"].split()[0] for query in queries]
+        self.assertEqual(statements, ["SELECT", "UPDATE"])
+
+    def test_new_row_with_explicit_primary_key_adds_one_query(self):
+        with CaptureQueriesContext(connection) as queries:
+            Order(pk=4711, status=Order.Status.PAID).save()
+
+        statements = [query["sql"].split()[0] for query in queries]
+        self.assertEqual(statements, ["SELECT", "UPDATE", "INSERT"])
+
+    def test_refused_save_leaves_transaction_usable(self):
+        order = Order.objects.create()
+        move(obj=Order.objects.get(pk=order.pk), to=Order.Status.CANCELLED)
+        order.note = "gift wrap"
+
+        with transaction.atomic():
+            with self.assertRaises(StalePhaseError):
+                order.save()
+
+            self.assertFalse(transaction.get_rollback())
+            order.refresh_from_db()
+            order.note = "gift wrap"
+            order.save()
+
+        stored = Order.objects.get(pk=order.pk)
+        self.assertEqual(stored.status, Order.Status.CANCELLED)
+        self.assertEqual(stored.note, "gift wrap")
+
+    def test_database_error_marks_transaction_for_rollback_like_plain_model(self):
+        order = Order.objects.create()
+        order.note = None
+        customer = Customer.objects.create()
+        customer.country = None
+
+        for instance in (customer, order):
+            with self.subTest(model=type(instance).__name__), transaction.atomic():
+                with self.assertRaises(IntegrityError):
+                    instance.save()
+
+                self.assertTrue(transaction.get_rollback())
+                with self.assertRaises(TransactionManagementError):
+                    type(instance)._base_manager.count()
+
+    def test_error_in_receiver_leaves_transaction_usable_like_plain_model(self):
+        def refuse(**kwargs):
+            raise ValueError("refused")
+
+        order = Order.objects.create()
+        customer = Customer.objects.create()
+
+        for instance in (customer, order):
+            model = type(instance)
+            signals.pre_save.connect(refuse, sender=model)
+            self.addCleanup(signals.pre_save.disconnect, refuse, sender=model)
+            with self.subTest(model=model.__name__), transaction.atomic():
+                with self.assertRaisesMessage(ValueError, "refused"):
+                    instance.save()
+
+                self.assertFalse(transaction.get_rollback())
+                self.assertEqual(model._base_manager.count(), 1)
+
+
+class PhaseGuardMixinAutocommitTest(TransactionTestCase):
+    def test_transaction_spans_lock_and_write(self):
+        order = Order.objects.create()
+        order.note = "gift wrap"
+
+        with CaptureQueriesContext(connection) as queries:
+            order.save()
+
+        statements = [query["sql"].split()[0] for query in queries]
+        self.assertEqual(statements, ["BEGIN", "SELECT", "UPDATE", "COMMIT"])
+        self.assertTrue(transaction.get_autocommit())
+        self.assertEqual(Order.objects.get(pk=order.pk).note, "gift wrap")
+
+    def test_refused_save_ends_its_transaction(self):
+        order = Order.objects.create()
+        move(obj=Order.objects.get(pk=order.pk), to=Order.Status.CANCELLED)
+        order.note = "gift wrap"
+
+        with CaptureQueriesContext(connection) as queries, self.assertRaises(StalePhaseError):
+            order.save()
+
+        statements = [query["sql"].split()[0] for query in queries]
+        self.assertEqual(statements, ["BEGIN", "SELECT", "ROLLBACK"])
+        self.assertTrue(transaction.get_autocommit())
+        self.assertEqual(Order.objects.get(pk=order.pk).note, "")
+
+    def test_failed_write_is_rolled_back(self):
+        def fail(**kwargs):
+            raise ValueError("failed")
+
+        order = Order.objects.create()
+        order.note = "gift wrap"
+        signals.post_save.connect(fail, sender=Order)
+        self.addCleanup(signals.post_save.disconnect, fail, sender=Order)
+
+        with self.assertRaisesMessage(ValueError, "failed"):
+            order.save()
+
+        self.assertTrue(transaction.get_autocommit())
+        self.assertEqual(Order.objects.get(pk=order.pk).note, "")
