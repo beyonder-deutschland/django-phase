@@ -111,7 +111,8 @@ class PhaseFieldMixin:
         Towards signals this behaves like `obj.save(update_fields=[<phase>, *fields, *<auto_now fields>])`: `pre_save`
         sees the new values on `obj` and may change those fields, `post_save` follows a successful UPDATE.
 
-        On success `obj` is refreshed, so field values given as expressions are read back as stored values. On failure
+        On success `obj` is refreshed, so field values given as expressions are read back as stored values, and so are
+        the model's generated fields, which the database may have recomputed from the new phase. On failure
         `obj` stays as it was: its phase no longer matches the database, so a later `save()` is refused as stale
         instead of overwriting what the winner of a race wrote.
         """
@@ -147,7 +148,8 @@ class PhaseFieldMixin:
             self._restore(obj=obj, loaded_state=loaded_state)
             raise self._illegal_transition(obj=obj, source=rows.values_list(self.attname, flat=True).first(), to=to)
 
-        obj.refresh_from_db(using=using, fields=[field.attname for field in written_fields])
+        generated_fields = [field for field in obj._meta.concrete_fields if field.generated]
+        obj.refresh_from_db(using=using, fields=[field.attname for field in (*written_fields, *generated_fields)])
         signals.post_save.send(
             sender=model, instance=obj, created=False, update_fields=update_fields, raw=False, using=using
         )

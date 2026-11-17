@@ -24,6 +24,17 @@ initial one — a phase field is never nullable (system check `phase.E004`).
 `phase` doesn't store which transitions happened. `move()` sends the usual model signals, so audit-log packages record
 transitions as they record other saves, see "Working with other parts of Django".
 
+### Switching off the guard
+
+`PhaseGuardMixin` checks every save of an existing instance, also one whose `update_fields` leave out the phase. There
+is no setting to skip the check, for a model or for saves that don't write the phase.
+
+The fields `move()` writes together with the phase (`paid_at`, `cancelled_by`, …) belong to the transition. A stale
+instance saving one of them would overwrite what the transition wrote, even though the phase column stays untouched,
+and the package can't tell those fields apart from unrelated ones like a note. The check costs little: the `UPDATE` of
+the save takes the same row lock anyway, the `SELECT … FOR UPDATE` only takes it one statement earlier. What it adds
+is one query per save inside a transaction, three in autocommit, see "What the guard costs" in Usage.
+
 ### Diagrams
 
 The transition table is a plain dict on the field and can be rendered by any tool that reads it. `phase` ships none.

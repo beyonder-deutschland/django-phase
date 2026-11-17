@@ -99,7 +99,8 @@ move(obj=order, to=Order.Status.PAID, paid_at=timezone.now())
   `IllegalPhaseTransitionError` is raised, exactly as for a transition missing from the table.
 * The same `UPDATE` also stamps the model's `auto_now` fields. As with `save()`, they always get the current time.
 * On success the instance is refreshed from the database, so `fields` given as expressions (`F("count") + 1`) are read
-  back as stored values.
+  back as stored values. The model's `GeneratedField`s are refreshed as well, because the database may have recomputed
+  them from the new phase.
 * On failure the instance stays as it was. Its phase no longer matches the database, so a later `save()` is refused
   with `StalePhaseError` instead of overwriting what the winner of the race wrote. Reload it to go on. The exception's
   `source` is the phase in the database, or `None` if the row doesn't exist (anymore).
@@ -110,7 +111,8 @@ move(obj=order, to=Order.Status.PAID, paid_at=timezone.now())
 * **The model's own `save()` isn't called.** Whatever a `save()` override does — computing fields, validating,
   triggering side effects — doesn't happen on a transition. Put logic that belongs to every write into a `pre_save` or
   `post_save` receiver, and logic that belongs to one transition into its action.
-* A successful `move()` costs two queries: the `UPDATE` and a `SELECT` that reloads the written fields.
+* A successful `move()` costs two queries: the `UPDATE` and a `SELECT` that reloads the written and the generated
+  fields.
 * The row is addressed through the model's base manager on the instance's database, so a filtering default manager
   doesn't hide it.
 * `can_transition(obj=…, to=…)` and `targets(obj=…)` answer read-only questions. They only know the table, not further
@@ -161,6 +163,29 @@ moved = move_many(
   refused with `StalePhaseError`. Reload it to go on.
 * The rows are written on the queryset's database. Which rows are moved is decided by the queryset, including the
   filter of the manager that built it.
+
+### Rows with different targets
+
+A job that decides the target per row — cancel the unpaid expired orders, mark the paid ones as paid — runs one
+`move_many()` per pair of source and target. Express each decision as a filter where you can:
+
+```python
+from django.db import transaction
+from django.utils import timezone
+
+from phase.transitions import move_many
+
+now = timezone.now()
+expired = Order.objects.filter(expires_at__lt=now)
+with transaction.atomic():
+    move_many(queryset=expired.filter(paid_at__isnull=True), source=Order.Status.OPEN, to=Order.Status.CANCELLED)
+    move_many(queryset=expired.filter(paid_at__isnull=False), source=Order.Status.OPEN, to=Order.Status.PAID)
+```
+
+Where the target is computed in Python, collect the primary keys per pair and pass each group as
+`queryset=Order.objects.filter(pk__in=pks)`. Either way every call stays race-safe on its own: a row that another
+request or an earlier call has moved out of `source` is skipped. The surrounding `transaction.atomic()` makes the
+calls succeed or fail together. The number of queries grows with the number of pairs, not with the number of rows.
 
 ## The mixin
 

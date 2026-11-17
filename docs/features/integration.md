@@ -57,6 +57,10 @@ an action in the view instead, and map refused actions to HTTP 409 as shown in "
 The admin leaves the field out of its forms, because it is never editable. List it in `readonly_fields` to show it on
 the detail page.
 
+A `ModelAdmin` that names its fields itself has to do the same: a phase field in `fields` or `fieldsets` but not in
+`readonly_fields` makes the admin raise `FieldError` when it builds the form, because a form can't contain a
+non-editable field. Converting a model whose status the admin could edit means moving the field to `readonly_fields`.
+
 To change the phase in the admin, offer the business actions as admin actions. Loop over the selection and call the
 action for each row, so signals, audit log and conditions beyond the table apply as everywhere else:
 

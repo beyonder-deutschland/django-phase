@@ -1,5 +1,11 @@
 # Changelog
 
+**0.4.1** (2026-11-17)
+  * `move()` also refreshes the model's `GeneratedField`s, so the instance and `post_save` receivers see the values the
+    database computed from the new phase
+  * Documented that a phase field in `fields` or `fieldsets` of a `ModelAdmin` has to be in `readonly_fields` as well
+  * Documented how to move many rows to different targets, and why the guard can't be switched off
+
 **0.4.0** (2026-11-16)
   * Inside a transaction a guarded `save()` runs one extra statement, the `SELECT … FOR UPDATE`, without a savepoint
     around it

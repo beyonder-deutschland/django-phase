@@ -71,6 +71,11 @@ class Invoice(PhaseGuardMixin, models.Model):
         },
     )
     note = models.CharField(max_length=100, blank=True, default="")
+    is_settled = models.GeneratedField(
+        expression=models.Q(status__in=(Status.PAID, Status.VOID)),
+        output_field=models.BooleanField(),
+        db_persist=True,
+    )
 
     def __str__(self) -> str:
         return f"Invoice {self.pk}: {self.status}"

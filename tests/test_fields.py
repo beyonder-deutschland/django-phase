@@ -341,6 +341,30 @@ class IntegerPhaseFieldTest(TestCase):
         self.assertEqual(stored.status, Invoice.Status.SENT)
         self.assertEqual(stored.note, "sent by mail")
 
+    def test_move_refreshes_generated_fields(self):
+        invoice = Invoice.objects.create()
+        self.assertFalse(invoice.is_settled)
+
+        with self.assertNumQueries(2):
+            self.field.move(obj=invoice, to=Invoice.Status.VOID)
+
+        self.assertTrue(invoice.is_settled)
+
+    def test_post_save_of_move_sees_generated_fields(self):
+        invoice = Invoice.objects.create()
+        seen = []
+
+        def receiver(instance, **kwargs):
+            seen.append(instance.is_settled)
+
+        signals.post_save.connect(receiver, sender=Invoice)
+        try:
+            self.field.move(obj=invoice, to=Invoice.Status.VOID)
+        finally:
+            signals.post_save.disconnect(receiver, sender=Invoice)
+
+        self.assertEqual(seen, [True])
+
     def test_refused_move_names_phases_by_label(self):
         invoice = Invoice.objects.create()
 
