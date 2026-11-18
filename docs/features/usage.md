@@ -108,6 +108,8 @@ move(obj=order, to=Order.Status.PAID, paid_at=timezone.now())
   values on the instance and may still change the written fields (not the phase), `post_save` with `created=False`
   follows a successful `UPDATE` and sees the stored values. A refused transition sends no `post_save`; one that loses a
   race has already sent `pre_save`, as `save()` does when the write fails.
+* **`phase_moved`** follows `post_save` and carries what the model signals don't: the phase the instance came from. See
+  "Signals" below.
 * **The model's own `save()` isn't called.** Whatever a `save()` override does — computing fields, validating,
   triggering side effects — doesn't happen on a transition. Put logic that belongs to every write into a `pre_save` or
   `post_save` receiver, and logic that belongs to one transition into its action.
@@ -150,15 +152,16 @@ moved = move_many(
 * It is race-safe for the same reason as `move()`: the condition on the source phase is part of the `UPDATE`. This
   also holds for a queryset that filters across relations (`filter(customer__country="DE")`), where a plain
   `QuerySet.update()` would move the condition into a subquery.
-* **No transaction of its own.** A single `UPDATE` is atomic by itself; inside the caller's `transaction.atomic()` it
-  commits or rolls back with everything else there.
+* **No transaction of its own** while nobody listens to `phase_moved_many`. A single `UPDATE` is atomic by itself;
+  inside the caller's `transaction.atomic()` it commits or rolls back with everything else there.
 * **A sliced queryset is refused** with `TypeError` before anything is written, as `QuerySet.update()` does. Ordering
   has no effect.
 * **One source per call.** The caller names the transition it means; moving rows from several phases to one target is
   one call per source.
-* **No signals.** Like `QuerySet.update()`, it sends no `pre_save` or `post_save`, and the model's `save()` isn't
-  called. Logic in receivers doesn't run. Where it must, or where each row needs its own logic (calls to other
-  systems, failures isolated per row), loop over the rows and call `move()` for each.
+* **No model signals.** Like `QuerySet.update()`, it sends no `pre_save` or `post_save`, and the model's `save()` isn't
+  called. Logic in those receivers doesn't run. Where it must, or where each row needs its own logic (calls to other
+  systems, failures isolated per row), loop over the rows and call `move()` for each. What it sends instead is
+  `phase_moved_many`, once per call, see "Signals" below.
 * **Instances in memory aren't updated.** An instance of a moved row keeps its old phase; a later `save()` on it is
   refused with `StalePhaseError`. Reload it to go on.
 * The rows are written on the queryset's database. Which rows are moved is decided by the queryset, including the
@@ -186,6 +189,71 @@ Where the target is computed in Python, collect the primary keys per pair and pa
 `queryset=Order.objects.filter(pk__in=pks)`. Either way every call stays race-safe on its own: a row that another
 request or an earlier call has moved out of `source` is skipped. The surrounding `transaction.atomic()` makes the
 calls succeed or fail together. The number of queries grows with the number of pairs, not with the number of rows.
+
+## Signals
+
+`phase.signals` has one signal per way of moving. Both are sent only for rows that actually changed: never for a
+transition missing from the table, never for one that lost a race.
+
+### `phase_moved`
+
+`move()` sends it after a successful `UPDATE`, right after `post_save`, with these arguments:
+
+* `sender`: the model class, `instance`: the moved instance with the stored values
+* `field`: the phase field
+* `source`, `target`: the phase the instance came from and the one it is in now, as stored values
+* `using`: the database alias
+
+A receiver that records transitions or reacts to one edge reads the source phase from the signal instead of reloading
+the row in `pre_save`:
+
+```python
+from django.dispatch import receiver
+
+from phase.signals import phase_moved
+
+
+@receiver(phase_moved, sender=Order)
+def record_transition(sender, instance, source, target, **kwargs):
+    OrderStatusChange.objects.create(order=instance, source=source, target=target)
+```
+
+### `phase_moved_many`
+
+`move_many()` sends it once per call, if at least one row moved, with these arguments:
+
+* `sender`: the model of the queryset
+* `field`: the phase field
+* `pks`: the primary keys of the moved rows, as a list
+* `source`, `target`, `using`: as for `phase_moved`
+
+An `UPDATE` reports how many rows it changed, not which ones. So **as soon as a receiver is connected for the model**,
+`move_many()` writes differently: inside a transaction it locks the rows of the queryset that are in `source` with
+`SELECT … FOR UPDATE`, reads their keys and updates exactly those rows. The lock keeps them in `source`, so every locked
+row is moved and `pks` is exact. Without a receiver, `move_many()` writes with the single `UPDATE` described above.
+
+What a receiver costs:
+
+* one query more, the `SELECT … FOR UPDATE`, plus the transaction (a savepoint inside the caller's transaction)
+* row locks on the moved rows until the surrounding transaction ends; rows of tables the queryset joins aren't locked
+* the keys in memory; the `UPDATE` runs in batches the database accepts as query parameters (a few hundred rows per batch on SQLite)
+
+The signal is sent inside that transaction, so a receiver that writes, e.g. history rows with `bulk_create()`, commits or
+rolls back together with the move, and a receiver that raises rolls the move back.
+
+```python
+from django.dispatch import receiver
+
+from phase.signals import phase_moved_many
+
+
+@receiver(phase_moved_many, sender=Order)
+def record_transitions(sender, pks, source, target, **kwargs):
+    OrderStatusChange.objects.bulk_create(OrderStatusChange(order_id=pk, source=source, target=target) for pk in pks)
+```
+
+Receivers are matched by `sender` as for Django's model signals: one connected for the concrete model doesn't receive
+a `move_many()` on a queryset of a proxy model.
 
 ## The mixin
 

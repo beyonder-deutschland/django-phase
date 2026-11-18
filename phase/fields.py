@@ -1,7 +1,7 @@
 from collections.abc import Mapping
 from types import SimpleNamespace
 
-from django.db import connections, models, router
+from django.db import connections, models, router, transaction
 from django.db.models import signals
 from django.db.models.query_utils import DeferredAttribute
 
@@ -12,6 +12,7 @@ from phase.exceptions import (
     MissingPhaseFieldError,
     ProtectedPhaseFieldError,
 )
+from phase.signals import phase_moved, phase_moved_many
 
 # The value of a phase as the database stores it.
 Phase = str | int
@@ -153,6 +154,7 @@ class PhaseFieldMixin:
         signals.post_save.send(
             sender=model, instance=obj, created=False, update_fields=update_fields, raw=False, using=using
         )
+        phase_moved.send(sender=model, instance=obj, field=self, source=source, target=to, using=using)
 
     def move_many(self, *, queryset: models.QuerySet, source: Phase, to: Phase, **fields: object) -> int:
         """
@@ -163,7 +165,10 @@ class PhaseFieldMixin:
 
         The UPDATE also writes `fields` and stamps the model's `auto_now` fields. Rows in another phase are skipped,
         so the return value, the number of rows moved, may be lower than the size of `queryset`. Like
-        `QuerySet.update()` this sends no signals and leaves instances in memory as they are.
+        `QuerySet.update()` this sends no `pre_save` or `post_save` and leaves instances in memory as they are.
+
+        When a receiver listens to `phase_moved_many` for the model, the rows are locked and read first, so the signal
+        names exactly the rows moved, see `_move_many_locked()`.
         """
         if self.name in fields or self.attname in fields:
             raise ProtectedPhaseFieldError(field_name=self.attname)
@@ -187,6 +192,8 @@ class PhaseFieldMixin:
         candidates = queryset.filter(**{self.attname: source})
         # The database `QuerySet.update()` would write to.
         using = candidates._db or router.db_for_write(queryset.model, **candidates._hints)
+        if phase_moved_many.has_listeners(queryset.model):
+            return self._move_many_locked(candidates=candidates, using=using, source=source, to=to, values=values)
         # Django moves the whole WHERE of an UPDATE into a subquery once the filter joins another table, so the
         # condition on the source phase would no longer apply to the row being written. It goes on the outer UPDATE,
         # which selects the rows by primary key only.
@@ -196,6 +203,32 @@ class PhaseFieldMixin:
             pks = list(candidates.values_list("pk", flat=True))
         rows = queryset.model._base_manager.using(using).filter(**{self.attname: source}, pk__in=pks)
         return rows.update(**values)
+
+    def _move_many_locked(
+        self, *, candidates: models.QuerySet, using: str, source: Phase, to: Phase, values: dict[str, object]
+    ) -> int:
+        """
+        Lock the rows of `candidates` in phase `source`, move exactly those and send `phase_moved_many` with their keys.
+
+        An UPDATE doesn't tell which rows it changed, so the keys are read with `SELECT … FOR UPDATE` before. The lock
+        keeps the rows in `source` until the transaction ends, so every locked row is moved. The outer SELECT reads the
+        model's table only, so rows of joined tables aren't locked. The UPDATE runs in batches the backend accepts as
+        query parameters. The signal is sent inside the transaction: a failing receiver rolls back the move.
+        """
+        model = candidates.model
+        base_rows = model._base_manager.using(using).filter(**{self.attname: source})
+        with transaction.atomic(using=using):
+            locked_rows = base_rows.select_for_update().filter(pk__in=candidates.values("pk"))
+            pks = list(locked_rows.values_list("pk", flat=True))
+            # Each batch passes its keys and the written values as query parameters.
+            parameter_fields = [model._meta.pk, *(model._meta.get_field(attname) for attname in values)]
+            batch_size = max(connections[using].ops.bulk_batch_size(parameter_fields, pks), 1)
+            moved = 0
+            for start in range(0, len(pks), batch_size):
+                moved += base_rows.filter(pk__in=pks[start : start + batch_size]).update(**values)
+            if pks:
+                phase_moved_many.send(sender=model, field=self, pks=pks, source=source, target=to, using=using)
+        return moved
 
     def _illegal_transition(self, *, obj: models.Model, source: Phase | None, to: Phase) -> IllegalPhaseTransitionError:
         return IllegalPhaseTransitionError(

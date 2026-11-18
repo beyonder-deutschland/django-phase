@@ -6,6 +6,7 @@
   same phase exactly one succeeds
 * `move_many()` moves a whole queryset from one phase to another with one conditional `UPDATE`, checked against
   the same table
+* `phase_moved` and `phase_moved_many` tell receivers which phase the rows came from and where they went
 * Every `save()` is guarded against a stale phase, so it can't silently undo a concurrent transition
 * Phases as strings (`PhaseField`) or numbers (`IntegerPhaseField`); migrations see a plain Django field and never
   import `phase`

@@ -15,8 +15,12 @@ packages built on these signals record a transition like any other save:
 * **django-simple-history** writes the historical record in `post_save`. `move()` sends it after reloading the written
   fields, so the record holds the stored values.
 
-`move_many()` sends no signals, so neither package records it. Where every transition has to show up in the audit log,
-loop over the rows and call `move()` for each.
+`move_many()` sends no `pre_save` or `post_save`, so neither package records it. Where every transition has to show up
+in the audit log, loop over the rows and call `move()` for each, or record the moved rows from a `phase_moved_many`
+receiver, see "Signals" in Usage.
+
+A history of transitions of your own needs neither package: a receiver of `phase_moved` gets the source and the target
+phase and writes one row per transition, see "Signals" in Usage.
 
 A receiver that writes in `pre_save` writes **before** the conditional `UPDATE`. If `move()` then loses a race, the
 audit entry for a transition that didn't happen is already in the database, unless a transaction around the move rolls
