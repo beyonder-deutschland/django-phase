@@ -1,5 +1,13 @@
 # Changelog
 
+**0.4.2** (2026-11-18)
+  * Switched the maintenance tooling from ambient-package-update to package-foundry; its configuration now lives in
+    `.package-foundry/`
+  * Updated the development dependencies to Sphinx 9 (`sphinx~=9.0`) and typer 0.29; package-foundry is only installed
+    on Python 3.13 and newer
+  * Updated the ruff pre-commit hook to v0.17.5 and `astral-sh/setup-uv` to v10.3.3
+  * The documentation badge in the README is served by shields.io, and the Sphinx copyright names Beyonder GmbH
+
 **0.4.1** (2026-11-17)
   * `move()` also refreshes the model's `GeneratedField`s, so the instance and `post_save` receivers see the values the
     database computed from the new phase
