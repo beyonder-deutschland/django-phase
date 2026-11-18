@@ -4,6 +4,9 @@
   * Signal `phase.signals.phase_moved`: sent by `move()` after `post_save`, with `source` and `target` phase
   * Signal `phase.signals.phase_moved_many`: sent once by `move_many()` with the primary keys of the moved rows; while a
     receiver listens for the model, `move_many()` locks and reads the rows before it moves them
+  * `force_move()`: sets a phase outside the transition table for data repairs, with the same conditional `UPDATE` and
+    signals as `move()`; `phase_moved` carries `forced=True` and the required `reason`, a stale instance raises
+    `StalePhaseError`
   * `phase.contrib.rest_framework.exception_handler` answers `PhaseGuardError`, `IllegalPhaseTransitionError` and
     `StalePhaseError` in Django REST framework with HTTP 409 and `{"code": …, "detail": …}`; the extra `drf` installs
     `djangorestframework`

@@ -148,6 +148,8 @@ class PhaseMovedTest(TestCase):
                         "field": Order._meta.get_field("status"),
                         "source": Order.Status.OPEN,
                         "target": Order.Status.PAID,
+                        "forced": False,
+                        "reason": None,
                         "using": "default",
                     },
                 ),

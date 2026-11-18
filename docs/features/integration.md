@@ -97,5 +97,40 @@ class OrderAdmin(admin.ModelAdmin):
         self.message_user(request, f"{cancelled} orders cancelled.", messages.SUCCESS)
 ```
 
-`move_many()` fits an admin action only where no signal receiver has to run for the transition, see "Moving many rows"
-in Usage.
+`move_many()` fits an admin action only where no `pre_save` or `post_save` receiver has to run for the transition, see
+"Moving many rows" in Usage.
+
+A correction outside the transition table, e.g. reopening orders for support, is an admin action built on
+`force_move()`. Give it its own permission, so not everyone who can change orders can force their phase, and pass a
+reason that names who forced it:
+
+```python
+from django.contrib import admin, messages
+
+from phase.exceptions import StalePhaseError
+from phase.transitions import force_move
+from shop.models import Order
+
+
+@admin.register(Order)
+class OrderAdmin(admin.ModelAdmin):
+    readonly_fields = ("status",)
+    actions = ("force_reopen",)
+
+    @admin.action(description="Reopen selected orders (support correction)", permissions=("force_phase",))
+    def force_reopen(self, request, queryset):
+        reopened = 0
+        for order in queryset:
+            try:
+                force_move(obj=order, to=Order.Status.OPEN, reason=f"Reopened in the admin by {request.user}")
+            except StalePhaseError:
+                self.message_user(request, f"{order} was changed in the meantime, try again.", messages.WARNING)
+            else:
+                reopened += 1
+        self.message_user(request, f"{reopened} orders reopened.", messages.SUCCESS)
+
+    def has_force_phase_permission(self, request):
+        return request.user.has_perm("shop.force_order_phase")
+```
+
+The permission `force_order_phase` is declared in the model's `Meta.permissions`.

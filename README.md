@@ -15,7 +15,8 @@ Creator & Maintainer: [Beyonder Deutschland](https://beyonder.de/)
 ## Features
 
 * Declare the allowed transitions once, as a table on the field
-* Assigning the phase directly raises; only `move()` and `move_many()` change it
+* Assigning the phase directly raises; only `move()` and `move_many()` change it, and `force_move()` as an explicit
+  escape hatch for data repairs
 * `move()` writes phase and further fields in **one** conditional `UPDATE`, so of two concurrent transitions from the
   same phase exactly one succeeds
 * `move_many()` moves a whole queryset from one phase to another with one conditional `UPDATE`, checked against

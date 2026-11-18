@@ -3,8 +3,8 @@
 ## The field
 
 A model whose status may only change along fixed transitions declares it as a `PhaseField`. The field owns the
-transition table; `phase.transitions.move()` and, for a whole queryset, `move_many()` are the only ways of
-changing it.
+transition table; `phase.transitions.move()` and, for a whole queryset, `move_many()` are the ways of changing it.
+`force_move()` sets a phase outside the table, for data repairs.
 
 ```python
 from django.db import models
@@ -35,7 +35,7 @@ class Order(PhaseGuardMixin, models.Model):
   `(Status.SHIPPED,)`. The field rejects anything else with `InvalidTransitionTableError`, because `(Status.SHIPPED)`
   is a plain string and `in` would match substrings.
 * **Direct assignment raises** `ProtectedPhaseFieldError`. The value is set once when the instance is built or loaded;
-  after that only `move()` and `move_many()` change it. Factories keep working, because they pass the phase to the
+  after that only `move()`, `move_many()` and `force_move()` change it. Factories keep working, because they pass the phase to the
   constructor.
 * **Never editable.** Admin and model forms leave the field out; passing `editable=True` raises
   `EditablePhaseFieldError`. List it in an admin's `readonly_fields` to show it on the detail page.
@@ -190,6 +190,33 @@ Where the target is computed in Python, collect the primary keys per pair and pa
 request or an earlier call has moved out of `source` is skipped. The surrounding `transaction.atomic()` makes the
 calls succeed or fail together. The number of queries grows with the number of pairs, not with the number of rows.
 
+## Forcing a phase
+
+Support corrections and data repairs sometimes have to put an instance into a phase the table doesn't allow from where
+it is. `force_move()` is the explicit, searchable way to do that:
+
+```python
+from django.utils import timezone
+
+from phase.transitions import force_move
+
+force_move(obj=order, to=Order.Status.OPEN, reason="Support ticket #123", reopened_at=timezone.now())
+```
+
+* **It ignores the transition table, nothing else.** It writes like `move()`: phase, `fields` and the `auto_now`
+  fields in one conditional `UPDATE` on the phase the instance holds, and refreshes the instance afterwards.
+* **A stale instance is refused** with `StalePhaseError`: if the phase in the database is no longer the one the
+  instance holds, or the row doesn't exist, nothing is written and the instance stays as it was.
+* **It sends the signals of a transition**: `pre_save` and `post_save` like `move()`, so audit logs record it, and
+  `phase_moved` with `forced=True` and the `reason`.
+* **`reason` is required** and only travels to the receivers; `phase` stores nothing. Record it in a `phase_moved`
+  receiver or your audit log.
+* There is no forced variant of `move_many()`. Repairs are deliberate and usually few; loop and call `force_move()`.
+
+Prefer a correction edge in the table where a correction is a regular business case, e.g. "reopen a cancelled order".
+`force_move()` is for the cases that must not become regular. Don't use it for statuses another system owns: those
+aren't phases, see "Scope". An admin action built on it is in "Working with other parts of Django".
+
 ## Signals
 
 `phase.signals` has one signal per way of moving. Both are sent only for rows that actually changed: never for a
@@ -197,11 +224,13 @@ transition missing from the table, never for one that lost a race.
 
 ### `phase_moved`
 
-`move()` sends it after a successful `UPDATE`, right after `post_save`, with these arguments:
+`move()` and `force_move()` send it after a successful `UPDATE`, right after `post_save`, with these arguments:
 
 * `sender`: the model class, `instance`: the moved instance with the stored values
 * `field`: the phase field
 * `source`, `target`: the phase the instance came from and the one it is in now, as stored values
+* `forced`: `True` for `force_move()`, which ignored the transition table, else `False`
+* `reason`: the reason given to `force_move()`, else `None`
 * `using`: the database alias
 
 A receiver that records transitions or reacts to one edge reads the source phase from the signal instead of reloading
