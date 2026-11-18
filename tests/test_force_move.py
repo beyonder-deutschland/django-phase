@@ -1,10 +1,12 @@
+from django.db import connection, transaction
 from django.db.models import F, signals
-from django.test import TestCase
+from django.test import TestCase, TransactionTestCase
+from django.test.utils import CaptureQueriesContext
 
-from phase.exceptions import ProtectedPhaseFieldError, StalePhaseError
+from phase.exceptions import IllegalPhaseTransitionError, ProtectedPhaseFieldError, StalePhaseError
 from phase.signals import phase_moved
 from phase.transitions import force_move, move
-from testapp.models import Invoice, Order
+from testapp.models import Invoice, Order, Ticket
 
 
 class ForceMoveTest(TestCase):
@@ -111,3 +113,86 @@ class ForceMoveSignalsTest(TestCase):
             force_move(obj=order, to=Order.Status.SHIPPED, reason="Support ticket #123")
 
         self.assertEqual([call[0] for call in self.calls], [signals.pre_save])
+
+
+class ForceMoveRefusalTest(TestCase):
+    def test_target_equal_to_current_phase_is_refused(self):
+        order = Order.objects.create()
+        calls = []
+        receiver = lambda sender, **kwargs: calls.append(sender)  # noqa: E731
+        signals.pre_save.connect(receiver, sender=Order)
+        self.addCleanup(signals.pre_save.disconnect, receiver, sender=Order)
+
+        with self.assertRaisesMessage(IllegalPhaseTransitionError, "cannot change from 'open' to 'open'"):
+            force_move(obj=order, to=Order.Status.OPEN, reason="Support ticket #123")
+
+        self.assertEqual(calls, [])
+
+    def test_target_outside_the_choices_is_refused(self):
+        order = Order.objects.create()
+
+        with self.assertRaisesMessage(IllegalPhaseTransitionError, "cannot change from 'open' to 'shiped'"):
+            force_move(obj=order, to="shiped", reason="Support ticket #123")
+
+        self.assertEqual(Order.objects.get(pk=order.pk).status, Order.Status.OPEN)
+
+    def test_numeric_target_outside_the_choices_is_refused(self):
+        invoice = Invoice.objects.create()
+
+        with self.assertRaises(IllegalPhaseTransitionError):
+            force_move(obj=invoice, to=9, reason="Support ticket #123")
+
+    def test_any_target_of_a_field_without_choices(self):
+        ticket = Ticket.objects.create()
+
+        force_move(obj=ticket, to="archived", reason="Support ticket #123")
+
+        self.assertEqual(Ticket.objects.get().status, "archived")
+
+
+class MoveAutocommitTest(TransactionTestCase):
+    def fail(self, **kwargs):
+        raise ValueError("failed")
+
+    def test_transaction_spans_write_and_signals(self):
+        order = Order.objects.create()
+
+        with CaptureQueriesContext(connection) as queries:
+            move(obj=order, to=Order.Status.PAID)
+
+        statements = [query["sql"].split()[0] for query in queries]
+        self.assertEqual(statements, ["BEGIN", "UPDATE", "SELECT", "COMMIT"])
+        self.assertTrue(transaction.get_autocommit())
+
+    def test_failing_post_save_receiver_rolls_back_move(self):
+        order = Order.objects.create(note="loaded")
+        signals.post_save.connect(self.fail, sender=Order)
+        self.addCleanup(signals.post_save.disconnect, self.fail, sender=Order)
+
+        with self.assertRaisesMessage(ValueError, "failed"):
+            move(obj=order, to=Order.Status.PAID, note="paid")
+
+        self.assertEqual((order.status, order.note), (Order.Status.OPEN, "loaded"))
+        stored = Order.objects.get(pk=order.pk)
+        self.assertEqual((stored.status, stored.note), (Order.Status.OPEN, "loaded"))
+
+    def test_failing_phase_moved_receiver_rolls_back_force_move(self):
+        order = Order.objects.create()
+        phase_moved.connect(self.fail, sender=Order)
+        self.addCleanup(phase_moved.disconnect, self.fail, sender=Order)
+
+        with self.assertRaises(ValueError):
+            force_move(obj=order, to=Order.Status.SHIPPED, reason="Support ticket #123")
+
+        self.assertEqual(order.status, Order.Status.OPEN)
+        self.assertEqual(Order.objects.get(pk=order.pk).status, Order.Status.OPEN)
+
+    def test_lost_race_in_autocommit(self):
+        order = Order.objects.create()
+        move(obj=Order.objects.get(pk=order.pk), to=Order.Status.CANCELLED)
+
+        with self.assertRaises(IllegalPhaseTransitionError):
+            move(obj=order, to=Order.Status.PAID)
+
+        self.assertTrue(transaction.get_autocommit())
+        self.assertEqual(order.status, Order.Status.OPEN)

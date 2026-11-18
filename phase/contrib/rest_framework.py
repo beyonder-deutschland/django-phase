@@ -20,6 +20,10 @@ ILLEGAL_PHASE_TRANSITION_DETAIL = _("This action isn't possible in the current s
 STALE_PHASE_CODE = "stale_phase"
 STALE_PHASE_DETAIL = _("The data was changed in the meantime. Reload the page and try again.")
 
+# For a `PhaseGuardError` subclass that doesn't define `code` or `detail`.
+PHASE_GUARD_CODE = "phase_guard"
+PHASE_GUARD_DETAIL = _("This action isn't possible right now.")
+
 
 class PhaseConflictError(APIException):
     """HTTP 409 with a stable `code` for machines and a `detail` for humans as the response body."""
@@ -34,7 +38,9 @@ class PhaseConflictError(APIException):
 def to_conflict_error(exc: BaseException) -> PhaseConflictError | None:
     """The 409 a refused action answers with, or `None` for any other exception."""
     if isinstance(exc, PhaseGuardError):
-        return PhaseConflictError(code=exc.code, detail=exc.detail)
+        return PhaseConflictError(
+            code=getattr(exc, "code", PHASE_GUARD_CODE), detail=getattr(exc, "detail", PHASE_GUARD_DETAIL)
+        )
     if isinstance(exc, IllegalPhaseTransitionError):
         return PhaseConflictError(code=ILLEGAL_PHASE_TRANSITION_CODE, detail=ILLEGAL_PHASE_TRANSITION_DETAIL)
     if isinstance(exc, StalePhaseError):

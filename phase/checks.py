@@ -3,7 +3,7 @@ from itertools import chain
 
 from django.apps import AppConfig, apps
 from django.core import checks
-from django.db.models import Model
+from django.db.models import Manager, Model
 
 from phase.fields import get_phase_fields
 from phase.managers import PhaseQuerySetMixin
@@ -93,9 +93,23 @@ def check_phase_managers(app_configs: list[AppConfig] | None = None, **kwargs: o
                 id="phase.W001",
             )
             for manager in managers
-            if not isinstance(manager.get_queryset(), PhaseQuerySetMixin)
+            if not _is_protected(manager=manager)
         )
     return warnings
+
+
+def _is_protected(*, manager: Manager) -> bool:
+    """
+    Whether the querysets of `manager` refuse bulk writes to the phase.
+
+    A manager may need context its `get_queryset()` doesn't have while checks run, e.g. the current tenant. Then the
+    queryset class it was built with decides.
+    """
+    try:
+        queryset = manager.get_queryset()
+    except Exception:  # noqa: BLE001 - any error of a project's manager; the check must not crash on it
+        return issubclass(manager._queryset_class, PhaseQuerySetMixin)
+    return isinstance(queryset, PhaseQuerySetMixin)
 
 
 def _models(*, app_configs: list[AppConfig] | None) -> Iterable[type[Model]]:

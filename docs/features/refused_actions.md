@@ -53,10 +53,14 @@ REST_FRAMEWORK = {
 ```
 
 * A refused action is a valid request that conflicts with the current state of the resource, so a `PhaseGuardError`
-  answers 409 as well, not 400. Its `code` and `detail` are the class attributes of the subclass.
+  answers 409 as well, not 400. Its `code` and `detail` are the class attributes of the subclass; a subclass that
+  lacks one answers with the code `phase_guard` and a generic text instead of failing.
 * `IllegalPhaseTransitionError` answers with the code `illegal_phase_transition`, `StalePhaseError` with
-  `stale_phase`. Their texts ask the user to reload; they are marked for translation, so a project's own translation
-  catalogue can translate them.
+  `stale_phase`. Their texts ask the user to reload.
+* **The default texts are English.** They are marked for translation, but `phase` ships no translations, and
+  `makemessages` in your project doesn't collect texts from installed packages. To translate them, add their msgids
+  by hand to a catalogue in one of your `LOCALE_PATHS`; they are the constants `ILLEGAL_PHASE_TRANSITION_DETAIL`,
+  `STALE_PHASE_DETAIL` and `PHASE_GUARD_DETAIL` in `phase.contrib.rest_framework`.
 * Every other exception goes to DRF's default handler.
 * `djangorestframework` is an optional dependency; `phase` imports it only in `phase.contrib.rest_framework`.
 

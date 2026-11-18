@@ -1,6 +1,7 @@
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+from functools import partial
 from types import SimpleNamespace
 
 from django.db import connections, models, router, transaction
@@ -152,9 +153,14 @@ class PhaseFieldMixin:
         and sends the same signals, `phase_moved` with `forced=True` and `reason`. The package stores nothing; `reason`
         only travels to the receivers. If the phase in the database is no longer the one `obj` holds, it writes nothing
         and raises `StalePhaseError`.
+
+        A target equal to the phase `obj` holds is no transition, and a target outside the field's choices is no phase;
+        both raise `IllegalPhaseTransitionError` before anything is written.
         """
         row = self._row(obj=obj)
         source = self._loaded_phase(obj=obj, row=row)
+        if to == source or not self._is_phase(to):
+            raise self._illegal_transition(obj=obj, source=source, to=to)
         if not self._write(obj=obj, row=row, source=source, to=to, fields=fields, forced=True, reason=reason):
             label = self.label(source)
             raise StalePhaseError(
@@ -163,6 +169,10 @@ class PhaseFieldMixin:
                 phases={self.attname: source},
                 labels=None if label is None else {self.attname: label},
             )
+
+    def _is_phase(self, value: object) -> bool:
+        """Whether `value` is one of the field's choices; any value is, if the field has no choices."""
+        return not self.choices or value in {choice for choice, _ in self.flatchoices}
 
     @staticmethod
     def _row(*, obj: models.Model) -> models.QuerySet:
@@ -195,7 +205,36 @@ class PhaseFieldMixin:
         Write phase `to` and `fields` to `row` if it is still in `source`, and send the signals of a transition.
 
         Returns whether the row was written. If not, `obj` is restored to the state it was loaded with.
+
+        In autocommit a transaction spans the write and the signals, as the guard of `save()` does, so a failing
+        receiver rolls the transition back and `obj` is restored. Inside the caller's transaction nothing wraps them:
+        an error leaves that transaction as a failing receiver of `save()` would.
         """
+        write = partial(
+            self._write_and_send, obj=obj, row=row, source=source, to=to, fields=fields, forced=forced, reason=reason
+        )
+        if not transaction.get_autocommit(using=row.db):
+            return write()
+        loaded_state = (dict(obj.__dict__), dict(obj._state.fields_cache))
+        try:
+            with transaction.atomic(using=row.db):
+                return write()
+        except BaseException:
+            self._restore(obj=obj, loaded_state=loaded_state)
+            raise
+
+    def _write_and_send(  # noqa: PLR0913
+        self,
+        *,
+        obj: models.Model,
+        row: models.QuerySet,
+        source: Phase | None,
+        to: Phase,
+        fields: Mapping[str, object],
+        forced: bool,
+        reason: str | None,
+    ) -> bool:
+        """The write of `_write()`, without a transaction of its own."""
         model = type(obj)
         using = row.db
         written_fields = self._written_fields(obj=obj, fields=fields)
@@ -298,7 +337,8 @@ class PhaseFieldMixin:
         model = candidates.model
         base_rows = model._base_manager.using(using).filter(**{self.attname: source})
         with transaction.atomic(using=using):
-            locked_rows = base_rows.select_for_update().filter(pk__in=candidates.values("pk"))
+            # Locking in key order keeps two overlapping calls from waiting on each other's rows.
+            locked_rows = base_rows.select_for_update().filter(pk__in=candidates.values("pk")).order_by("pk")
             pks = list(locked_rows.values_list("pk", flat=True))
             # Each batch passes its keys and the written values as query parameters.
             parameter_fields = [model._meta.pk, *(model._meta.get_field(attname) for attname in values)]

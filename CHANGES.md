@@ -6,7 +6,10 @@
     receiver listens for the model, `move_many()` locks and reads the rows before it moves them
   * `force_move()`: sets a phase outside the transition table for data repairs, with the same conditional `UPDATE` and
     signals as `move()`; `phase_moved` carries `forced=True` and the required `reason`, a stale instance raises
-    `StalePhaseError`
+    `StalePhaseError`, and a target equal to the current phase or outside the field's choices raises
+    `IllegalPhaseTransitionError`
+  * In autocommit `move()` and `force_move()` open a transaction around the write and the signals, so a failing
+    receiver rolls the transition back
   * `PhaseManager`, `PhaseQuerySet` and `PhaseQuerySetMixin` refuse `update()`, `bulk_update()` and
     `bulk_create(update_conflicts=True)` that write the phase field with `ProtectedPhaseFieldError`; transitions pass,
     also through a protected base manager

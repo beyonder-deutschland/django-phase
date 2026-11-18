@@ -85,3 +85,9 @@ class ToConflictErrorTest(TestCase):
     def test_default_texts_are_translatable(self):
         self.assertIsInstance(ILLEGAL_PHASE_TRANSITION_DETAIL, Promise)
         self.assertIsInstance(STALE_PHASE_DETAIL, Promise)
+
+    def test_phase_guard_error_without_code_and_detail(self):
+        conflict = to_conflict_error(PhaseGuardError("Order ID #7 can't be changed."))
+
+        self.assertEqual(conflict.get_codes(), {"code": "phase_guard", "detail": "phase_guard"})
+        self.assertEqual(conflict.detail["detail"], "This action isn't possible right now.")

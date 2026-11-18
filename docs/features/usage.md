@@ -116,8 +116,11 @@ move(obj=order, to=Order.Status.PAID, paid_at=timezone.now())
 * **The model's own `save()` isn't called.** Whatever a `save()` override does — computing fields, validating,
   triggering side effects — doesn't happen on a transition. Put logic that belongs to every write into a `pre_save` or
   `post_save` receiver, and logic that belongs to one transition into its action.
+* **In autocommit a transaction spans the write and the signals**, as for a guarded `save()`: a receiver of `pre_save`,
+  `post_save` or `phase_moved` that raises rolls the transition back, and the instance stays as it was. Inside the
+  caller's transaction nothing wraps them; the error leaves that transaction as a failing receiver of `save()` would.
 * A successful `move()` costs two queries: the `UPDATE` and a `SELECT` that reloads the written and the generated
-  fields.
+  fields. In autocommit the `BEGIN` and `COMMIT` of the transaction around them come on top.
 * The row is addressed through the model's base manager on the instance's database, so a filtering default manager
   doesn't hide it.
 * `can_transition(obj=…, to=…)` and `targets(obj=…)` answer read-only questions. They only know the table, not further
@@ -210,6 +213,10 @@ force_move(obj=order, to=Order.Status.OPEN, reason="Support ticket #123", reopen
   fields in one conditional `UPDATE` on the phase the instance holds, and refreshes the instance afterwards.
 * **A stale instance is refused** with `StalePhaseError`: if the phase in the database is no longer the one the
   instance holds, or the row doesn't exist, nothing is written and the instance stays as it was.
+* **The target has to be a different phase** and, for a field with `choices`, one of them. Forcing an instance into
+  the phase it already holds, or into a value that isn't a phase (`"shiped"`), raises `IllegalPhaseTransitionError`
+  before anything is written or sent. An admin action over a selection skips such rows instead of reporting them as
+  moved.
 * **It sends the signals of a transition**: `pre_save` and `post_save` like `move()`, so audit logs record it, and
   `phase_moved` with `forced=True` and the `reason`.
 * **`reason` is required** and only travels to the receivers; `phase` stores nothing. Record it in a `phase_moved`
@@ -285,7 +292,9 @@ def record_transitions(sender, pks, source, target, **kwargs):
 ```
 
 Receivers are matched by `sender` as for Django's model signals: one connected for the concrete model doesn't receive
-a `move_many()` on a queryset of a proxy model.
+a `move_many()` on a queryset of a proxy model. A receiver connected without `sender` listens to every model, so it
+switches every `move_many()` in the project to the locked way of writing. Connect receivers for the models they are
+meant for.
 
 ## The mixin
 

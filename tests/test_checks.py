@@ -242,3 +242,27 @@ class CheckPhaseManagersTest(SimpleTestCase):
                 app_label = "testapp"
 
         self.assertEqual(self.check(Parcel), [])
+
+    @isolate_apps("testapp")
+    def test_manager_needing_context_falls_back_to_its_queryset_class(self):
+        class TenantPhaseManager(PhaseManager):
+            def get_queryset(self):
+                raise RuntimeError
+
+        class TenantManager(models.Manager):
+            def get_queryset(self):
+                raise RuntimeError
+
+        class Parcel(PhaseGuardMixin, models.Model):  # noqa: DJ008
+            status = PhaseField(max_length=10, transitions={})
+
+            objects = TenantPhaseManager()
+            all_objects = TenantManager()
+
+            class Meta:
+                app_label = "testapp"
+
+        self.assertEqual(
+            self.check(Parcel),
+            [("phase.W001", Parcel, "testapp.Parcel.all_objects doesn't refuse bulk writes to the phase field.")],
+        )
