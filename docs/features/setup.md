@@ -13,3 +13,6 @@ INSTALLED_APPS = (
 ```
 
 `phase` has no models and no migrations.
+
+For the exception handler for Django REST framework, install the extra `drf`: `pip install django-phase[drf]`. See
+"Refused actions".

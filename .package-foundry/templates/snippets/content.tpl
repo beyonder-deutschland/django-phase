@@ -12,6 +12,7 @@
 * System checks catch a missing mixin, a second phase field, a nullable one or one inherited from a concrete parent
   model
 * `PhaseGuardError` gives refused actions a stable `code` for machines and a `detail` for humans
+* An optional exception handler for Django REST framework answers refused actions with HTTP 409
 * Overrides no private Django method
 
 ```python

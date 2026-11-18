@@ -1,5 +1,10 @@
 # Changelog
 
+**0.5.0** (2026-11-18)
+  * `phase.contrib.rest_framework.exception_handler` answers `PhaseGuardError`, `IllegalPhaseTransitionError` and
+    `StalePhaseError` in Django REST framework with HTTP 409 and `{"code": …, "detail": …}`; the extra `drf` installs
+    `djangorestframework`
+
 **0.4.2** (2026-11-18)
   * Switched the maintenance tooling from ambient-package-update to package-foundry; its configuration now lives in
     `.package-foundry/`

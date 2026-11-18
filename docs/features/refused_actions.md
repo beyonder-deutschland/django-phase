@@ -30,46 +30,47 @@ should understand checks the phase itself and raises a guard instead of relying 
 
 ## Answering with HTTP 409
 
-`phase` knows nothing about your API framework. With Django REST framework, map the exceptions in a custom exception
-handler, so views neither catch them nor build responses by hand:
+With Django REST framework, `phase` ships an exception handler, so views neither catch refused actions nor build
+responses by hand. Install the extra and register the handler:
 
-```python
-from rest_framework import status
-from rest_framework.exceptions import APIException
-from rest_framework.views import exception_handler as drf_exception_handler
-
-from phase.exceptions import IllegalPhaseTransitionError, PhaseGuardError, StalePhaseError
-
-
-class ConflictError(APIException):
-    status_code = status.HTTP_409_CONFLICT
-    default_code = "conflict"
-
-    def __init__(self, *, code: str, detail: str):
-        super().__init__(detail={"code": code, "detail": detail}, code=code)
-
-
-def exception_handler(exc, context):
-    if isinstance(exc, PhaseGuardError):
-        exc = ConflictError(code=exc.code, detail=exc.detail)
-    elif isinstance(exc, IllegalPhaseTransitionError):
-        exc = ConflictError(
-            code="illegal_phase_transition",
-            detail="This action isn't possible in the current status. Reload the page to see it.",
-        )
-    elif isinstance(exc, StalePhaseError):
-        exc = ConflictError(
-            code="stale_phase",
-            detail="The data was changed in the meantime. Reload the page and try again.",
-        )
-    return drf_exception_handler(exc, context)
+```bash
+pip install django-phase[drf]
 ```
 
-Every 409 then has the same body:
+```python
+REST_FRAMEWORK = {
+    "EXCEPTION_HANDLER": "phase.contrib.rest_framework.exception_handler",
+}
+```
+
+`PhaseGuardError`, `IllegalPhaseTransitionError` and `StalePhaseError` then answer **HTTP 409** with the same body:
 
 ```json
 {
   "code": "order_already_shipped",
   "detail": "The order has already been shipped, so its address can't be changed anymore."
 }
+```
+
+* A refused action is a valid request that conflicts with the current state of the resource, so a `PhaseGuardError`
+  answers 409 as well, not 400. Its `code` and `detail` are the class attributes of the subclass.
+* `IllegalPhaseTransitionError` answers with the code `illegal_phase_transition`, `StalePhaseError` with
+  `stale_phase`. Their texts ask the user to reload; they are marked for translation, so a project's own translation
+  catalogue can translate them.
+* Every other exception goes to DRF's default handler.
+* `djangorestframework` is an optional dependency; `phase` imports it only in `phase.contrib.rest_framework`.
+
+A project with an exception handler of its own uses the pieces it needs: `to_conflict_error(exc)` returns the
+`PhaseConflictError` (an `APIException` with status 409) for a refused action and `None` for anything else.
+
+```python
+from rest_framework.views import exception_handler as drf_exception_handler
+
+from phase.contrib.rest_framework import to_conflict_error
+
+
+def exception_handler(exc, context):
+    exc = to_conflict_error(exc) or exc
+    # ... the project's own mappings
+    return drf_exception_handler(exc, context)
 ```
