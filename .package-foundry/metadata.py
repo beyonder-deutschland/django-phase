@@ -37,10 +37,6 @@ METADATA = PackageMetadata(
     optional_dependencies={
         "dev": [
             *DEV_DEPENDENCIES,
-            "djangorestframework~=3.16",
-        ],
-        "drf": [
-            "djangorestframework>=3.16",
         ],
     },
     ruff_ignore_list=[],

@@ -56,8 +56,7 @@ responses and ignored in requests. Nothing has to be configured.
 A serializer field declared by hand for the phase (`status = serializers.IntegerField()`) is writable. Saving such a
 serializer assigns the phase to the instance and raises `ProtectedPhaseFieldError`, which surfaces as a server error.
 That is intended: a phase taken from a request without passing the transition table is a bug. Change the phase through
-an action in the view instead, and let the exception handler `phase.contrib.rest_framework.exception_handler` answer
-refused actions with HTTP 409, see "Refused actions".
+an action in the view instead, and map refused actions to HTTP 409 as shown in "Refused actions".
 
 ## Django admin
 

@@ -49,10 +49,6 @@ dev = [
    'uv~=0.13',
    'keyring~=25.7',
    'package-foundry; python_version >= "3.13"',
-   'djangorestframework~=3.16',
-]
-drf = [
-   'djangorestframework>=3.16',
 ]
 
 [project.urls]

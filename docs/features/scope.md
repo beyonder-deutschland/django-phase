@@ -123,6 +123,14 @@ It is the most expensive way for an existing model.
 `PhaseField`, possibly with its own transition table. The parent keeps the common data. There is no common phase
 across all parcels then.
 
+### API frameworks
+
+`phase` ships no code for Django REST framework or any other API framework: no exception handler, no serializer
+fields, no viewsets, no endpoints for transitions. Answering a refused action is a few lines that follow the error
+format of the project's API, and an optional dependency on an API framework would tie the releases and the test matrix
+of `phase` to it. "Refused actions" shows an exception handler for Django REST framework to copy, "Working with other
+parts of Django" how a serializer treats a phase field.
+
 ### Diagrams
 
 The transition table is a plain dict on the field and can be rendered by any tool that reads it. `phase` ships none.
