@@ -1,5 +1,10 @@
 # Changelog
 
+**0.6.0** (2026-11-18)
+  * Removed `phase.contrib.rest_framework` and the extra `drf`: `phase` ships no code for API frameworks. Projects
+    using `phase.contrib.rest_framework.exception_handler` copy the exception handler from "Refused actions" into
+    their own code and point `REST_FRAMEWORK["EXCEPTION_HANDLER"]` at it
+
 **0.5.1** (2026-11-18)
   * The hint of system check `phase.E003` names the ways to convert a model that inherits its phase field from a
     concrete parent
