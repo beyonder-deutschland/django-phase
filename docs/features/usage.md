@@ -51,7 +51,8 @@ class Order(PhaseGuardMixin, models.Model):
   its own model. This is what lets `move()` find the field without being told.
 * **The field lives in the model's own table** (system check `phase.E003`). A model must not inherit its `PhaseField`
   from a concrete parent model: Django would split the `UPDATE` of `move()` in two, and two concurrent transitions
-  could both succeed. An abstract parent is fine.
+  could both succeed. An abstract parent is fine. How to convert an existing model with multi-table inheritance is
+  described in "Scope", "Phase fields inherited through multi-table inheritance".
 
 ## Phases stored as numbers
 

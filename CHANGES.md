@@ -1,5 +1,11 @@
 # Changelog
 
+**0.5.1** (2026-11-18)
+  * The hint of system check `phase.E003` names the ways to convert a model that inherits its phase field from a
+    concrete parent
+  * Documented how to convert such a model: a one-to-one relation to the parent instead of the inheritance, with a
+    state-only migration, an abstract parent, or the phase field in the children
+
 **0.5.0** (2026-11-18)
   * Signal `phase.signals.phase_moved`: sent by `move()` after `post_save`, with `source` and `target` phase
   * Signal `phase.signals.phase_moved_many`: sent once by `move_many()` with the primary keys of the moved rows; while a

@@ -49,7 +49,11 @@ def check_phase_fields(app_configs: list[AppConfig] | None = None, **kwargs: obj
             errors.append(
                 checks.Error(
                     f"{model._meta.label} inherits its PhaseField from a concrete parent model.",
-                    hint="Make the parent abstract, or give the lifecycle its own model without concrete children.",
+                    hint=(
+                        "Replace the inheritance by a OneToOneField to the parent and move the parent, make the parent "
+                        "abstract, or move the phase field into the children. See 'Phase fields inherited through "
+                        "multi-table inheritance' in the documentation."
+                    ),
                     obj=model,
                     id="phase.E003",
                 )
