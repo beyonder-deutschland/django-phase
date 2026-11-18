@@ -1,9 +1,12 @@
+from collections.abc import Iterable
 from itertools import chain
 
 from django.apps import AppConfig, apps
 from django.core import checks
+from django.db.models import Manager, Model
 
 from phase.fields import get_phase_fields
+from phase.managers import PhaseQuerySetMixin
 from phase.mixins.phase_guard import PhaseGuardMixin
 
 
@@ -20,13 +23,8 @@ def check_phase_fields(app_configs: list[AppConfig] | None = None, **kwargs: obj
     reports a row that doesn't exist as "no phase". Proxy models share their concrete model's fields and are reported
     there.
     """
-    if app_configs is None:
-        models = apps.get_models()
-    else:
-        models = chain.from_iterable(app_config.get_models() for app_config in app_configs)
-
     errors = []
-    for model in models:
+    for model in _models(app_configs=app_configs):
         if model._meta.proxy:
             continue
         phase_fields = get_phase_fields(model=model)
@@ -66,3 +64,55 @@ def check_phase_fields(app_configs: list[AppConfig] | None = None, **kwargs: obj
                 )
             )
     return errors
+
+
+@checks.register(checks.Tags.models)
+def check_phase_managers(app_configs: list[AppConfig] | None = None, **kwargs: object) -> list[checks.Warning]:
+    """
+    Every manager of a model with a phase field refuses bulk writes to it.
+
+    `update()`, `bulk_update()` and `bulk_create(update_conflicts=True)` on a plain manager set the phase past the
+    transition table and the guard. A manager built on `PhaseQuerySetMixin` refuses them. Every declared manager is
+    checked, so a second plain manager next to a protected one doesn't leave the gap open. A proxy model is checked
+    for the managers it declares itself; those it inherits are reported on its concrete model. The base manager isn't
+    checked: Django uses it internally, and only a model that names one in `Meta.base_manager_name` declares it.
+    """
+    warnings = []
+    for model in _models(app_configs=app_configs):
+        if not get_phase_fields(model=model):
+            continue
+        managers = model._meta.local_managers if model._meta.proxy else model._meta.managers
+        warnings.extend(
+            checks.Warning(
+                f"{model._meta.label}.{manager.name} doesn't refuse bulk writes to the phase field.",
+                hint=(
+                    "Build the manager on PhaseQuerySet or PhaseQuerySetMixin, e.g. objects = PhaseManager(). To "
+                    "allow update() and bulk_update() on the phase, add 'phase.W001' to SILENCED_SYSTEM_CHECKS."
+                ),
+                obj=model,
+                id="phase.W001",
+            )
+            for manager in managers
+            if not _is_protected(manager=manager)
+        )
+    return warnings
+
+
+def _is_protected(*, manager: Manager) -> bool:
+    """
+    Whether the querysets of `manager` refuse bulk writes to the phase.
+
+    A manager may need context its `get_queryset()` doesn't have while checks run, e.g. the current tenant. Then the
+    queryset class it was built with decides.
+    """
+    try:
+        queryset = manager.get_queryset()
+    except Exception:  # noqa: BLE001 - any error of a project's manager; the check must not crash on it
+        return issubclass(manager._queryset_class, PhaseQuerySetMixin)
+    return isinstance(queryset, PhaseQuerySetMixin)
+
+
+def _models(*, app_configs: list[AppConfig] | None) -> Iterable[type[Model]]:
+    if app_configs is None:
+        return apps.get_models()
+    return chain.from_iterable(app_config.get_models() for app_config in app_configs)

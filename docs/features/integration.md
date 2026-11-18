@@ -15,8 +15,12 @@ packages built on these signals record a transition like any other save:
 * **django-simple-history** writes the historical record in `post_save`. `move()` sends it after reloading the written
   fields, so the record holds the stored values.
 
-`move_many()` sends no signals, so neither package records it. Where every transition has to show up in the audit log,
-loop over the rows and call `move()` for each.
+`move_many()` sends no `pre_save` or `post_save`, so neither package records it. Where every transition has to show up
+in the audit log, loop over the rows and call `move()` for each, or record the moved rows from a `phase_moved_many`
+receiver, see "Signals" in Usage.
+
+A history of transitions of your own needs neither package: a receiver of `phase_moved` gets the source and the target
+phase and writes one row per transition, see "Signals" in Usage.
 
 A receiver that writes in `pre_save` writes **before** the conditional `UPDATE`. If `move()` then loses a race, the
 audit entry for a transition that didn't happen is already in the database, unless a transaction around the move rolls
@@ -30,9 +34,11 @@ inserted with the phase given, **without a check against the transition table**:
 phase, including a final one. That is what an import of existing data needs, and it means the import is responsible
 for valid values.
 
-`bulk_create(update_conflicts=True, update_fields=[…])` with the phase field among `update_fields` overwrites the phase
-of existing rows without a transition and without the guard, like `QuerySet.update()`. Leave the phase field out of
-`update_fields` unless the import is meant to overwrite phases.
+`bulk_create(update_conflicts=True, update_fields=[…])` with the phase field among `update_fields` would overwrite the
+phase of existing rows without a transition and without the guard, like `QuerySet.update()`. A protected manager
+refuses it with `ProtectedPhaseFieldError`, see "Protected managers" in Usage. An import that is meant to overwrite
+phases goes through the plain base manager, `Order._base_manager.bulk_create(…)`, so the exception stays visible in
+review.
 
 ## `get_or_create()` and `update_or_create()`
 
@@ -50,7 +56,8 @@ responses and ignored in requests. Nothing has to be configured.
 A serializer field declared by hand for the phase (`status = serializers.IntegerField()`) is writable. Saving such a
 serializer assigns the phase to the instance and raises `ProtectedPhaseFieldError`, which surfaces as a server error.
 That is intended: a phase taken from a request without passing the transition table is a bug. Change the phase through
-an action in the view instead, and map refused actions to HTTP 409 as shown in "Refused actions".
+an action in the view instead, and let the exception handler `phase.contrib.rest_framework.exception_handler` answer
+refused actions with HTTP 409, see "Refused actions".
 
 ## Django admin
 
@@ -92,5 +99,40 @@ class OrderAdmin(admin.ModelAdmin):
         self.message_user(request, f"{cancelled} orders cancelled.", messages.SUCCESS)
 ```
 
-`move_many()` fits an admin action only where no signal receiver has to run for the transition, see "Moving many rows"
-in Usage.
+`move_many()` fits an admin action only where no `pre_save` or `post_save` receiver has to run for the transition, see
+"Moving many rows" in Usage.
+
+A correction outside the transition table, e.g. reopening orders for support, is an admin action built on
+`force_move()`. Give it its own permission, so not everyone who can change orders can force their phase, and pass a
+reason that names who forced it:
+
+```python
+from django.contrib import admin, messages
+
+from phase.exceptions import StalePhaseError
+from phase.transitions import force_move
+from shop.models import Order
+
+
+@admin.register(Order)
+class OrderAdmin(admin.ModelAdmin):
+    readonly_fields = ("status",)
+    actions = ("force_reopen",)
+
+    @admin.action(description="Reopen selected orders (support correction)", permissions=("force_phase",))
+    def force_reopen(self, request, queryset):
+        reopened = 0
+        for order in queryset:
+            try:
+                force_move(obj=order, to=Order.Status.OPEN, reason=f"Reopened in the admin by {request.user}")
+            except StalePhaseError:
+                self.message_user(request, f"{order} was changed in the meantime, try again.", messages.WARNING)
+            else:
+                reopened += 1
+        self.message_user(request, f"{reopened} orders reopened.", messages.SUCCESS)
+
+    def has_force_phase_permission(self, request):
+        return request.user.has_perm("shop.force_order_phase")
+```
+
+The permission `force_order_phase` is declared in the model's `Meta.permissions`.

@@ -1,7 +1,10 @@
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import partial
 from types import SimpleNamespace
 
-from django.db import connections, models, router
+from django.db import connections, models, router, transaction
 from django.db.models import signals
 from django.db.models.query_utils import DeferredAttribute
 
@@ -11,13 +14,32 @@ from phase.exceptions import (
     InvalidTransitionTableError,
     MissingPhaseFieldError,
     ProtectedPhaseFieldError,
+    StalePhaseError,
 )
+from phase.signals import phase_moved, phase_moved_many
 
 # The value of a phase as the database stores it.
 Phase = str | int
 
 # Set on the instance while `PhaseGuardMixin.refresh_from_db()` runs, so the reload may overwrite the phase.
 REFRESHING_FLAG = "_phase_field_refreshing"
+
+# True while a transition writes the phase, so a `PhaseQuerySet` lets that one `update()` through.
+_writing_phase: ContextVar[bool] = ContextVar("phase_writing_phase", default=False)
+
+
+@contextmanager
+def writing_phase() -> Iterator[None]:
+    """Let `PhaseQuerySet.update()` write the phase for the duration of the block. Only transitions use it."""
+    token = _writing_phase.set(True)
+    try:
+        yield
+    finally:
+        _writing_phase.reset(token)
+
+
+def is_writing_phase() -> bool:
+    return _writing_phase.get()
 
 
 class ProtectedPhaseDescriptor(DeferredAttribute):
@@ -116,19 +138,105 @@ class PhaseFieldMixin:
         `obj` stays as it was: its phase no longer matches the database, so a later `save()` is refused as stale
         instead of overwriting what the winner of a race wrote.
         """
-        model = type(obj)
-        using = router.db_for_write(model, instance=obj)
-        rows = model._base_manager.using(using).filter(pk=obj.pk)
-
-        source = getattr(obj, self.attname)
-        if is_expression(source):
-            # On Django 5.2 a backend without INSERT … RETURNING leaves the `db_default` placeholder on the instance.
-            source = rows.values_list(self.attname, flat=True).first()
-            if source is not None:
-                obj.__dict__[self.attname] = source
+        row = self._row(obj=obj)
+        source = self._loaded_phase(obj=obj, row=row)
         if to not in self.transitions.get(source, ()):
             raise self._illegal_transition(obj=obj, source=source, to=to)
+        if not self._write(obj=obj, row=row, source=source, to=to, fields=fields, forced=False, reason=None):
+            raise self._illegal_transition(obj=obj, source=row.values_list(self.attname, flat=True).first(), to=to)
 
+    def force_move(self, *, obj: models.Model, to: Phase, reason: str, **fields: object) -> None:
+        """
+        Move `obj` to phase `to` whether or not the transition table allows it, e.g. to repair data.
+
+        Ignores the table, nothing else: it writes like `move()`, with a conditional UPDATE on the phase `obj` holds,
+        and sends the same signals, `phase_moved` with `forced=True` and `reason`. The package stores nothing; `reason`
+        only travels to the receivers. If the phase in the database is no longer the one `obj` holds, it writes nothing
+        and raises `StalePhaseError`.
+
+        A target equal to the phase `obj` holds is no transition, and a target outside the field's choices is no phase;
+        both raise `IllegalPhaseTransitionError` before anything is written.
+        """
+        row = self._row(obj=obj)
+        source = self._loaded_phase(obj=obj, row=row)
+        if to == source or not self._is_phase(to):
+            raise self._illegal_transition(obj=obj, source=source, to=to)
+        if not self._write(obj=obj, row=row, source=source, to=to, fields=fields, forced=True, reason=reason):
+            label = self.label(source)
+            raise StalePhaseError(
+                model_name=obj._meta.label,
+                pk=obj.pk,
+                phases={self.attname: source},
+                labels=None if label is None else {self.attname: label},
+            )
+
+    def _is_phase(self, value: object) -> bool:
+        """Whether `value` is one of the field's choices; any value is, if the field has no choices."""
+        return not self.choices or value in {choice for choice, _ in self.flatchoices}
+
+    @staticmethod
+    def _row(*, obj: models.Model) -> models.QuerySet:
+        """The row of `obj`, through the base manager on the database a save of `obj` would write to."""
+        model = type(obj)
+        return model._base_manager.using(router.db_for_write(model, instance=obj)).filter(pk=obj.pk)
+
+    def _loaded_phase(self, *, obj: models.Model, row: models.QuerySet) -> Phase | None:
+        """The phase `obj` holds, read from `row` if `obj` still holds the `db_default` placeholder."""
+        phase = getattr(obj, self.attname)
+        if is_expression(phase):
+            # On Django 5.2 a backend without INSERT … RETURNING leaves the `db_default` placeholder on the instance.
+            phase = row.values_list(self.attname, flat=True).first()
+            if phase is not None:
+                obj.__dict__[self.attname] = phase
+        return phase
+
+    def _write(  # noqa: PLR0913
+        self,
+        *,
+        obj: models.Model,
+        row: models.QuerySet,
+        source: Phase | None,
+        to: Phase,
+        fields: Mapping[str, object],
+        forced: bool,
+        reason: str | None,
+    ) -> bool:
+        """
+        Write phase `to` and `fields` to `row` if it is still in `source`, and send the signals of a transition.
+
+        Returns whether the row was written. If not, `obj` is restored to the state it was loaded with.
+
+        In autocommit a transaction spans the write and the signals, as the guard of `save()` does, so a failing
+        receiver rolls the transition back and `obj` is restored. Inside the caller's transaction nothing wraps them:
+        an error leaves that transaction as a failing receiver of `save()` would.
+        """
+        write = partial(
+            self._write_and_send, obj=obj, row=row, source=source, to=to, fields=fields, forced=forced, reason=reason
+        )
+        if not transaction.get_autocommit(using=row.db):
+            return write()
+        loaded_state = (dict(obj.__dict__), dict(obj._state.fields_cache))
+        try:
+            with transaction.atomic(using=row.db):
+                return write()
+        except BaseException:
+            self._restore(obj=obj, loaded_state=loaded_state)
+            raise
+
+    def _write_and_send(  # noqa: PLR0913
+        self,
+        *,
+        obj: models.Model,
+        row: models.QuerySet,
+        source: Phase | None,
+        to: Phase,
+        fields: Mapping[str, object],
+        forced: bool,
+        reason: str | None,
+    ) -> bool:
+        """The write of `_write()`, without a transaction of its own."""
+        model = type(obj)
+        using = row.db
         written_fields = self._written_fields(obj=obj, fields=fields)
         update_fields = frozenset(field.name for field in written_fields)
 
@@ -140,19 +248,31 @@ class PhaseFieldMixin:
             signals.pre_save.send(sender=model, instance=obj, raw=False, using=using, update_fields=update_fields)
             # Like `save()`: values are read after `pre_save`, and `Field.pre_save()` stamps the `auto_now` fields.
             values = {field.attname: field.pre_save(obj, add=False) for field in written_fields}
-            updated_rows = rows.filter(**{self.attname: source}).update(**values)
+            with writing_phase():
+                updated_rows = row.filter(**{self.attname: source}).update(**values)
         except BaseException:
             self._restore(obj=obj, loaded_state=loaded_state)
             raise
         if not updated_rows:
             self._restore(obj=obj, loaded_state=loaded_state)
-            raise self._illegal_transition(obj=obj, source=rows.values_list(self.attname, flat=True).first(), to=to)
+            return False
 
         generated_fields = [field for field in obj._meta.concrete_fields if field.generated]
         obj.refresh_from_db(using=using, fields=[field.attname for field in (*written_fields, *generated_fields)])
         signals.post_save.send(
             sender=model, instance=obj, created=False, update_fields=update_fields, raw=False, using=using
         )
+        phase_moved.send(
+            sender=model,
+            instance=obj,
+            field=self,
+            source=source,
+            target=to,
+            forced=forced,
+            reason=reason,
+            using=using,
+        )
+        return True
 
     def move_many(self, *, queryset: models.QuerySet, source: Phase, to: Phase, **fields: object) -> int:
         """
@@ -163,7 +283,10 @@ class PhaseFieldMixin:
 
         The UPDATE also writes `fields` and stamps the model's `auto_now` fields. Rows in another phase are skipped,
         so the return value, the number of rows moved, may be lower than the size of `queryset`. Like
-        `QuerySet.update()` this sends no signals and leaves instances in memory as they are.
+        `QuerySet.update()` this sends no `pre_save` or `post_save` and leaves instances in memory as they are.
+
+        When a receiver listens to `phase_moved_many` for the model, the rows are locked and read first, so the signal
+        names exactly the rows moved, see `_move_many_locked()`.
         """
         if self.name in fields or self.attname in fields:
             raise ProtectedPhaseFieldError(field_name=self.attname)
@@ -187,6 +310,8 @@ class PhaseFieldMixin:
         candidates = queryset.filter(**{self.attname: source})
         # The database `QuerySet.update()` would write to.
         using = candidates._db or router.db_for_write(queryset.model, **candidates._hints)
+        if phase_moved_many.has_listeners(queryset.model):
+            return self._move_many_locked(candidates=candidates, using=using, source=source, to=to, values=values)
         # Django moves the whole WHERE of an UPDATE into a subquery once the filter joins another table, so the
         # condition on the source phase would no longer apply to the row being written. It goes on the outer UPDATE,
         # which selects the rows by primary key only.
@@ -195,7 +320,36 @@ class PhaseFieldMixin:
             # MySQL refuses a subquery on the table being updated; the outer condition still guards every row.
             pks = list(candidates.values_list("pk", flat=True))
         rows = queryset.model._base_manager.using(using).filter(**{self.attname: source}, pk__in=pks)
-        return rows.update(**values)
+        with writing_phase():
+            return rows.update(**values)
+
+    def _move_many_locked(
+        self, *, candidates: models.QuerySet, using: str, source: Phase, to: Phase, values: dict[str, object]
+    ) -> int:
+        """
+        Lock the rows of `candidates` in phase `source`, move exactly those and send `phase_moved_many` with their keys.
+
+        An UPDATE doesn't tell which rows it changed, so the keys are read with `SELECT … FOR UPDATE` before. The lock
+        keeps the rows in `source` until the transaction ends, so every locked row is moved. The outer SELECT reads the
+        model's table only, so rows of joined tables aren't locked. The UPDATE runs in batches the backend accepts as
+        query parameters. The signal is sent inside the transaction: a failing receiver rolls back the move.
+        """
+        model = candidates.model
+        base_rows = model._base_manager.using(using).filter(**{self.attname: source})
+        with transaction.atomic(using=using):
+            # Locking in key order keeps two overlapping calls from waiting on each other's rows.
+            locked_rows = base_rows.select_for_update().filter(pk__in=candidates.values("pk")).order_by("pk")
+            pks = list(locked_rows.values_list("pk", flat=True))
+            # Each batch passes its keys and the written values as query parameters.
+            parameter_fields = [model._meta.pk, *(model._meta.get_field(attname) for attname in values)]
+            batch_size = max(connections[using].ops.bulk_batch_size(parameter_fields, pks), 1)
+            moved = 0
+            for start in range(0, len(pks), batch_size):
+                with writing_phase():
+                    moved += base_rows.filter(pk__in=pks[start : start + batch_size]).update(**values)
+            if pks:
+                phase_moved_many.send(sender=model, field=self, pks=pks, source=source, target=to, using=using)
+        return moved
 
     def _illegal_transition(self, *, obj: models.Model, source: Phase | None, to: Phase) -> IllegalPhaseTransitionError:
         return IllegalPhaseTransitionError(

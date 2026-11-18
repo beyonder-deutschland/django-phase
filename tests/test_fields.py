@@ -584,7 +584,7 @@ class MoveManyTest(TestCase):
 
         def read_keys_then_lose_a_race(pks):
             keys = list(pks)
-            Order.objects.filter(pk=moved_meanwhile.pk).update(status=Order.Status.PAID)
+            Order._base_manager.filter(pk=moved_meanwhile.pk).update(status=Order.Status.PAID)
             return keys
 
         with (

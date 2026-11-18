@@ -1,17 +1,21 @@
 ## Features
 
 * Declare the allowed transitions once, as a table on the field
-* Assigning the phase directly raises; only `move()` and `move_many()` change it
+* Assigning the phase directly raises; only `move()` and `move_many()` change it, and `force_move()` as an explicit
+  escape hatch for data repairs
 * `move()` writes phase and further fields in **one** conditional `UPDATE`, so of two concurrent transitions from the
   same phase exactly one succeeds
 * `move_many()` moves a whole queryset from one phase to another with one conditional `UPDATE`, checked against
   the same table
+* `phase_moved` and `phase_moved_many` tell receivers which phase the rows came from and where they went
 * Every `save()` is guarded against a stale phase, so it can't silently undo a concurrent transition
+* `PhaseManager` refuses `update()`, `bulk_update()` and `bulk_create(update_conflicts=True)` on the phase field
 * Phases as strings (`PhaseField`) or numbers (`IntegerPhaseField`); migrations see a plain Django field and never
   import `phase`
-* System checks catch a missing mixin, a second phase field, a nullable one or one inherited from a concrete parent
-  model
+* System checks catch a missing mixin, a second phase field, a nullable one, one inherited from a concrete parent
+  model or a manager that lets bulk writes past the field
 * `PhaseGuardError` gives refused actions a stable `code` for machines and a `detail` for humans
+* An optional exception handler for Django REST framework answers refused actions with HTTP 409
 * Overrides no private Django method
 
 ```python
@@ -19,6 +23,7 @@ from django.db import models
 from django.utils import timezone
 
 from phase.fields import PhaseField
+from phase.managers import PhaseManager
 from phase.mixins.phase_guard import PhaseGuardMixin
 from phase.transitions import move
 
@@ -40,6 +45,8 @@ class Order(PhaseGuardMixin, models.Model):
         },
     )
     paid_at = models.DateTimeField(null=True, blank=True)
+
+    objects = PhaseManager()
 
 
 order = Order.objects.create()

@@ -1,5 +1,24 @@
 # Changelog
 
+**0.5.0** (2026-11-18)
+  * Signal `phase.signals.phase_moved`: sent by `move()` after `post_save`, with `source` and `target` phase
+  * Signal `phase.signals.phase_moved_many`: sent once by `move_many()` with the primary keys of the moved rows; while a
+    receiver listens for the model, `move_many()` locks and reads the rows before it moves them
+  * `force_move()`: sets a phase outside the transition table for data repairs, with the same conditional `UPDATE` and
+    signals as `move()`; `phase_moved` carries `forced=True` and the required `reason`, a stale instance raises
+    `StalePhaseError`, and a target equal to the current phase or outside the field's choices raises
+    `IllegalPhaseTransitionError`
+  * In autocommit `move()` and `force_move()` open a transaction around the write and the signals, so a failing
+    receiver rolls the transition back
+  * `PhaseManager`, `PhaseQuerySet` and `PhaseQuerySetMixin` refuse `update()`, `bulk_update()` and
+    `bulk_create(update_conflicts=True)` that write the phase field with `ProtectedPhaseFieldError`; transitions pass,
+    also through a protected base manager
+  * System check `phase.W001` warns about every manager of a phase model that isn't built on `PhaseQuerySetMixin`.
+    Existing phase models get this warning until their managers are protected or the check is silenced
+  * `phase.contrib.rest_framework.exception_handler` answers `PhaseGuardError`, `IllegalPhaseTransitionError` and
+    `StalePhaseError` in Django REST framework with HTTP 409 and `{"code": …, "detail": …}`; the extra `drf` installs
+    `djangorestframework`
+
 **0.4.2** (2026-11-18)
   * Switched the maintenance tooling from ambient-package-update to package-foundry; its configuration now lives in
     `.package-foundry/`

@@ -3,13 +3,14 @@
 ## The field
 
 A model whose status may only change along fixed transitions declares it as a `PhaseField`. The field owns the
-transition table; `phase.transitions.move()` and, for a whole queryset, `move_many()` are the only ways of
-changing it.
+transition table; `phase.transitions.move()` and, for a whole queryset, `move_many()` are the ways of changing it.
+`force_move()` sets a phase outside the table, for data repairs.
 
 ```python
 from django.db import models
 
 from phase.fields import PhaseField
+from phase.managers import PhaseManager
 from phase.mixins.phase_guard import PhaseGuardMixin
 
 
@@ -29,13 +30,15 @@ class Order(PhaseGuardMixin, models.Model):
             Status.PAID: (Status.SHIPPED,),
         },
     )
+
+    objects = PhaseManager()
 ```
 
 * A phase missing from `transitions` is final. Targets are tuples; a single target needs the trailing comma,
   `(Status.SHIPPED,)`. The field rejects anything else with `InvalidTransitionTableError`, because `(Status.SHIPPED)`
   is a plain string and `in` would match substrings.
 * **Direct assignment raises** `ProtectedPhaseFieldError`. The value is set once when the instance is built or loaded;
-  after that only `move()` and `move_many()` change it. Factories keep working, because they pass the phase to the
+  after that only `move()`, `move_many()` and `force_move()` change it. Factories keep working, because they pass the phase to the
   constructor.
 * **Never editable.** Admin and model forms leave the field out; passing `editable=True` raises
   `EditablePhaseFieldError`. List it in an admin's `readonly_fields` to show it on the detail page.
@@ -108,11 +111,16 @@ move(obj=order, to=Order.Status.PAID, paid_at=timezone.now())
   values on the instance and may still change the written fields (not the phase), `post_save` with `created=False`
   follows a successful `UPDATE` and sees the stored values. A refused transition sends no `post_save`; one that loses a
   race has already sent `pre_save`, as `save()` does when the write fails.
+* **`phase_moved`** follows `post_save` and carries what the model signals don't: the phase the instance came from. See
+  "Signals" below.
 * **The model's own `save()` isn't called.** Whatever a `save()` override does — computing fields, validating,
   triggering side effects — doesn't happen on a transition. Put logic that belongs to every write into a `pre_save` or
   `post_save` receiver, and logic that belongs to one transition into its action.
+* **In autocommit a transaction spans the write and the signals**, as for a guarded `save()`: a receiver of `pre_save`,
+  `post_save` or `phase_moved` that raises rolls the transition back, and the instance stays as it was. Inside the
+  caller's transaction nothing wraps them; the error leaves that transaction as a failing receiver of `save()` would.
 * A successful `move()` costs two queries: the `UPDATE` and a `SELECT` that reloads the written and the generated
-  fields.
+  fields. In autocommit the `BEGIN` and `COMMIT` of the transaction around them come on top.
 * The row is addressed through the model's base manager on the instance's database, so a filtering default manager
   doesn't hide it.
 * `can_transition(obj=…, to=…)` and `targets(obj=…)` answer read-only questions. They only know the table, not further
@@ -150,15 +158,16 @@ moved = move_many(
 * It is race-safe for the same reason as `move()`: the condition on the source phase is part of the `UPDATE`. This
   also holds for a queryset that filters across relations (`filter(customer__country="DE")`), where a plain
   `QuerySet.update()` would move the condition into a subquery.
-* **No transaction of its own.** A single `UPDATE` is atomic by itself; inside the caller's `transaction.atomic()` it
-  commits or rolls back with everything else there.
+* **No transaction of its own** while nobody listens to `phase_moved_many`. A single `UPDATE` is atomic by itself;
+  inside the caller's `transaction.atomic()` it commits or rolls back with everything else there.
 * **A sliced queryset is refused** with `TypeError` before anything is written, as `QuerySet.update()` does. Ordering
   has no effect.
 * **One source per call.** The caller names the transition it means; moving rows from several phases to one target is
   one call per source.
-* **No signals.** Like `QuerySet.update()`, it sends no `pre_save` or `post_save`, and the model's `save()` isn't
-  called. Logic in receivers doesn't run. Where it must, or where each row needs its own logic (calls to other
-  systems, failures isolated per row), loop over the rows and call `move()` for each.
+* **No model signals.** Like `QuerySet.update()`, it sends no `pre_save` or `post_save`, and the model's `save()` isn't
+  called. Logic in those receivers doesn't run. Where it must, or where each row needs its own logic (calls to other
+  systems, failures isolated per row), loop over the rows and call `move()` for each. What it sends instead is
+  `phase_moved_many`, once per call, see "Signals" below.
 * **Instances in memory aren't updated.** An instance of a moved row keeps its old phase; a later `save()` on it is
   refused with `StalePhaseError`. Reload it to go on.
 * The rows are written on the queryset's database. Which rows are moved is decided by the queryset, including the
@@ -186,6 +195,106 @@ Where the target is computed in Python, collect the primary keys per pair and pa
 `queryset=Order.objects.filter(pk__in=pks)`. Either way every call stays race-safe on its own: a row that another
 request or an earlier call has moved out of `source` is skipped. The surrounding `transaction.atomic()` makes the
 calls succeed or fail together. The number of queries grows with the number of pairs, not with the number of rows.
+
+## Forcing a phase
+
+Support corrections and data repairs sometimes have to put an instance into a phase the table doesn't allow from where
+it is. `force_move()` is the explicit, searchable way to do that:
+
+```python
+from django.utils import timezone
+
+from phase.transitions import force_move
+
+force_move(obj=order, to=Order.Status.OPEN, reason="Support ticket #123", reopened_at=timezone.now())
+```
+
+* **It ignores the transition table, nothing else.** It writes like `move()`: phase, `fields` and the `auto_now`
+  fields in one conditional `UPDATE` on the phase the instance holds, and refreshes the instance afterwards.
+* **A stale instance is refused** with `StalePhaseError`: if the phase in the database is no longer the one the
+  instance holds, or the row doesn't exist, nothing is written and the instance stays as it was.
+* **The target has to be a different phase** and, for a field with `choices`, one of them. Forcing an instance into
+  the phase it already holds, or into a value that isn't a phase (`"shiped"`), raises `IllegalPhaseTransitionError`
+  before anything is written or sent. An admin action over a selection skips such rows instead of reporting them as
+  moved.
+* **It sends the signals of a transition**: `pre_save` and `post_save` like `move()`, so audit logs record it, and
+  `phase_moved` with `forced=True` and the `reason`.
+* **`reason` is required** and only travels to the receivers; `phase` stores nothing. Record it in a `phase_moved`
+  receiver or your audit log.
+* There is no forced variant of `move_many()`. Repairs are deliberate and usually few; loop and call `force_move()`.
+
+Prefer a correction edge in the table where a correction is a regular business case, e.g. "reopen a cancelled order".
+`force_move()` is for the cases that must not become regular. Don't use it for statuses another system owns: those
+aren't phases, see "Scope". An admin action built on it is in "Working with other parts of Django".
+
+## Signals
+
+`phase.signals` has one signal per way of moving. Both are sent only for rows that actually changed: never for a
+transition missing from the table, never for one that lost a race.
+
+### `phase_moved`
+
+`move()` and `force_move()` send it after a successful `UPDATE`, right after `post_save`, with these arguments:
+
+* `sender`: the model class, `instance`: the moved instance with the stored values
+* `field`: the phase field
+* `source`, `target`: the phase the instance came from and the one it is in now, as stored values
+* `forced`: `True` for `force_move()`, which ignored the transition table, else `False`
+* `reason`: the reason given to `force_move()`, else `None`
+* `using`: the database alias
+
+A receiver that records transitions or reacts to one edge reads the source phase from the signal instead of reloading
+the row in `pre_save`:
+
+```python
+from django.dispatch import receiver
+
+from phase.signals import phase_moved
+
+
+@receiver(phase_moved, sender=Order)
+def record_transition(sender, instance, source, target, **kwargs):
+    OrderStatusChange.objects.create(order=instance, source=source, target=target)
+```
+
+### `phase_moved_many`
+
+`move_many()` sends it once per call, if at least one row moved, with these arguments:
+
+* `sender`: the model of the queryset
+* `field`: the phase field
+* `pks`: the primary keys of the moved rows, as a list
+* `source`, `target`, `using`: as for `phase_moved`
+
+An `UPDATE` reports how many rows it changed, not which ones. So **as soon as a receiver is connected for the model**,
+`move_many()` writes differently: inside a transaction it locks the rows of the queryset that are in `source` with
+`SELECT … FOR UPDATE`, reads their keys and updates exactly those rows. The lock keeps them in `source`, so every locked
+row is moved and `pks` is exact. Without a receiver, `move_many()` writes with the single `UPDATE` described above.
+
+What a receiver costs:
+
+* one query more, the `SELECT … FOR UPDATE`, plus the transaction (a savepoint inside the caller's transaction)
+* row locks on the moved rows until the surrounding transaction ends; rows of tables the queryset joins aren't locked
+* the keys in memory; the `UPDATE` runs in batches the database accepts as query parameters (a few hundred rows per batch on SQLite)
+
+The signal is sent inside that transaction, so a receiver that writes, e.g. history rows with `bulk_create()`, commits or
+rolls back together with the move, and a receiver that raises rolls the move back.
+
+```python
+from django.dispatch import receiver
+
+from phase.signals import phase_moved_many
+
+
+@receiver(phase_moved_many, sender=Order)
+def record_transitions(sender, pks, source, target, **kwargs):
+    OrderStatusChange.objects.bulk_create(OrderStatusChange(order_id=pk, source=source, target=target) for pk in pks)
+```
+
+Receivers are matched by `sender` as for Django's model signals: one connected for the concrete model doesn't receive
+a `move_many()` on a queryset of a proxy model. A receiver connected without `sender` listens to every model, so it
+switches every `move_many()` in the project to the locked way of writing. Connect receivers for the models they are
+meant for.
 
 ## The mixin
 
@@ -220,11 +329,64 @@ The lock taken by the `SELECT` lasts until the surrounding transaction ends, als
 Only the save of an existing instance with a loaded phase is guarded. An `INSERT` (`create()`, a new instance without a
 primary key, `force_insert=True`) and a save with empty `update_fields` cost nothing extra.
 
+## Protected managers
+
+`QuerySet.update()`, `bulk_update()` and `bulk_create(update_conflicts=True)` write the phase column without passing
+the field, so they would bypass the transition table and the guard. A manager built on `PhaseQuerySet` refuses them:
+
+```python
+from phase.managers import PhaseManager
+
+
+class Order(PhaseGuardMixin, models.Model):
+    status = PhaseField(...)
+
+    objects = PhaseManager()
+```
+
+* `update()` raises `ProtectedPhaseFieldError` when its keywords contain the phase field, `bulk_update()` when its
+  `fields` do, and `bulk_create(update_conflicts=True)` when its `update_fields` do. Writes of other fields pass, and
+  `bulk_create()` without `update_conflicts` inserts rows in any phase, see "Bulk creation and imports" in "Working with
+  other parts of Django".
+* Related managers (`customer.order_set.update(…)`) use the class of the default manager and are protected with it.
+* `move()`, `move_many()` and `force_move()` keep working, also when the model's base manager is protected
+  (`Meta.base_manager_name`): they let exactly their own `UPDATE` through.
+* `PhaseQuerySet.as_manager()` works as well. A project with querysets of its own (custom managers, packages such as
+  django-treebeard) puts `PhaseQuerySetMixin` in front of its queryset:
+
+```python
+from django.utils import timezone
+
+from phase.managers import PhaseQuerySetMixin
+
+
+class OrderQuerySet(PhaseQuerySetMixin, models.QuerySet):
+    def expired(self):
+        return self.filter(expires_at__lt=timezone.now())
+
+
+class Order(PhaseGuardMixin, models.Model):
+    objects = OrderQuerySet.as_manager()
+```
+
+* **Data migrations are unaffected.** `PhaseManager` isn't used in migrations (`use_in_migrations` is `False`), and
+  the historical model sees a plain `CharField`, so a data migration writes phases like any other column and has to
+  respect the table by hand.
+
+**System check `phase.W001`** warns about every manager of a phase model that isn't built on `PhaseQuerySetMixin`,
+including the automatic `objects` of a model that declares none and a plain second manager next to a protected one. A
+proxy model is checked for the managers it declares itself. The base manager isn't checked, because Django uses it
+internally; a model only declares it with `Meta.base_manager_name`. A project that deliberately allows bulk writes to
+the phase silences the warning with `SILENCED_SYSTEM_CHECKS = ["phase.W001"]`.
+
+When converting an existing model, protecting its managers turns every bulk write of the phase into an exception in the
+test suite. Replace each one with `move_many()` or, for repairs, `force_move()`.
+
 ## Limits
 
-* `QuerySet.update()` and `bulk_update()` bypass both the field and the mixin. Use `move_many()` for bulk transitions;
-  data migrations and other bulk writes have to respect the table by hand. So does
-  `bulk_create(update_conflicts=True)` with the phase among `update_fields`, see "Working with other parts of Django".
+* With a plain manager (`phase.W001` silenced), `QuerySet.update()`, `bulk_update()` and
+  `bulk_create(update_conflicts=True)` bypass both the field and the mixin. So does the plain base manager,
+  `Order._base_manager`, which isn't protected unless the model names a protected one in `Meta.base_manager_name`.
 * A model can have only one phase field, it can't be inherited from a concrete parent model, and it can't be
   nullable.
 * Phases are strings (`PhaseField`) or small positive integers (`IntegerPhaseField`). Other column types aren't

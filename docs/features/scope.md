@@ -22,7 +22,9 @@ initial one — a phase field is never nullable (system check `phase.E004`).
 ### History of transitions
 
 `phase` doesn't store which transitions happened. `move()` sends the usual model signals, so audit-log packages record
-transitions as they record other saves, see "Working with other parts of Django".
+transitions as they record other saves, see "Working with other parts of Django". `phase_moved` and
+`phase_moved_many` carry the source and the target phase, so a history model of the project's own takes a receiver of
+a few lines, see "Signals" in Usage.
 
 ### Switching off the guard
 
@@ -43,23 +45,6 @@ The transition table is a plain dict on the field and can be rendered by any too
 
 These are open on purpose. Each one is a trade-off that is better decided with experience from projects using the
 package than up front.
-
-### Protection against `QuerySet.update()` and `bulk_update()`
-
-Both write the phase column without passing the field, so they bypass the transition table and the guard. A queryset
-mixin could refuse any `update()` or `bulk_update()` that writes the phase field, so existing bypasses fail in the test
-suite instead of having to be found by review.
-
-Not included yet, because it only works where a project opts in on every manager of the model — many models bring
-their own managers and querysets — and because it changes how the package's own bulk writes have to reach the
-database. Until then, `move_many()` is the way to change the phase of many rows, and a review rule or lint check keeps
-`update(<phase>=…)` and `bulk_update(…, [<phase>])` out of the code.
-
-### Signals for `move_many()`
-
-`move_many()` writes with one `UPDATE` and doesn't know which rows it moved, so it can't send signals per row, and
-audit logs don't see it. Sending them would need the moved rows back from the `UPDATE` (`UPDATE … RETURNING`), which
-Django's public queryset API doesn't offer. Where signals matter, loop and call `move()`.
 
 ### Admin integration
 
