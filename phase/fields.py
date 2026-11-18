@@ -1,4 +1,6 @@
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from types import SimpleNamespace
 
 from django.db import connections, models, router, transaction
@@ -20,6 +22,23 @@ Phase = str | int
 
 # Set on the instance while `PhaseGuardMixin.refresh_from_db()` runs, so the reload may overwrite the phase.
 REFRESHING_FLAG = "_phase_field_refreshing"
+
+# True while a transition writes the phase, so a `PhaseQuerySet` lets that one `update()` through.
+_writing_phase: ContextVar[bool] = ContextVar("phase_writing_phase", default=False)
+
+
+@contextmanager
+def writing_phase() -> Iterator[None]:
+    """Let `PhaseQuerySet.update()` write the phase for the duration of the block. Only transitions use it."""
+    token = _writing_phase.set(True)
+    try:
+        yield
+    finally:
+        _writing_phase.reset(token)
+
+
+def is_writing_phase() -> bool:
+    return _writing_phase.get()
 
 
 class ProtectedPhaseDescriptor(DeferredAttribute):
@@ -190,7 +209,8 @@ class PhaseFieldMixin:
             signals.pre_save.send(sender=model, instance=obj, raw=False, using=using, update_fields=update_fields)
             # Like `save()`: values are read after `pre_save`, and `Field.pre_save()` stamps the `auto_now` fields.
             values = {field.attname: field.pre_save(obj, add=False) for field in written_fields}
-            updated_rows = row.filter(**{self.attname: source}).update(**values)
+            with writing_phase():
+                updated_rows = row.filter(**{self.attname: source}).update(**values)
         except BaseException:
             self._restore(obj=obj, loaded_state=loaded_state)
             raise
@@ -261,7 +281,8 @@ class PhaseFieldMixin:
             # MySQL refuses a subquery on the table being updated; the outer condition still guards every row.
             pks = list(candidates.values_list("pk", flat=True))
         rows = queryset.model._base_manager.using(using).filter(**{self.attname: source}, pk__in=pks)
-        return rows.update(**values)
+        with writing_phase():
+            return rows.update(**values)
 
     def _move_many_locked(
         self, *, candidates: models.QuerySet, using: str, source: Phase, to: Phase, values: dict[str, object]
@@ -284,7 +305,8 @@ class PhaseFieldMixin:
             batch_size = max(connections[using].ops.bulk_batch_size(parameter_fields, pks), 1)
             moved = 0
             for start in range(0, len(pks), batch_size):
-                moved += base_rows.filter(pk__in=pks[start : start + batch_size]).update(**values)
+                with writing_phase():
+                    moved += base_rows.filter(pk__in=pks[start : start + batch_size]).update(**values)
             if pks:
                 phase_moved_many.send(sender=model, field=self, pks=pks, source=source, target=to, using=using)
         return moved

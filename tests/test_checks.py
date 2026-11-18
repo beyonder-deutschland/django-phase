@@ -6,8 +6,9 @@ from django.db import models
 from django.test import SimpleTestCase
 from django.test.utils import isolate_apps
 
-from phase.checks import check_phase_fields
+from phase.checks import check_phase_fields, check_phase_managers
 from phase.fields import IntegerPhaseField, PhaseField
+from phase.managers import PhaseManager, PhaseQuerySetMixin
 from phase.mixins.phase_guard import PhaseGuardMixin
 
 
@@ -125,3 +126,119 @@ class CheckPhaseFieldsTest(SimpleTestCase):
 
         with mock.patch("phase.checks.apps.get_models", return_value=[Parcel]):
             self.assertEqual(check_phase_fields(), [])
+
+
+class OpenQuerySet(PhaseQuerySetMixin, models.QuerySet):
+    def open(self) -> models.QuerySet:
+        return self.filter(status="open")
+
+
+class CheckPhaseManagersTest(SimpleTestCase):
+    def check(self, *models_to_check):
+        with mock.patch("phase.checks.apps.get_models", return_value=list(models_to_check)):
+            return [(warning.id, warning.obj, warning.msg) for warning in check_phase_managers()]
+
+    def test_check_is_registered(self):
+        self.assertIn(check_phase_managers, checks.registry.registry.get_checks())
+
+    def test_installed_models_pass(self):
+        self.assertEqual(check_phase_managers(), [])
+
+    def test_only_given_apps_are_checked(self):
+        self.assertEqual(check_phase_managers(app_configs=[apps.get_app_config("testapp")]), [])
+
+    @isolate_apps("testapp")
+    def test_automatic_default_manager(self):
+        class Parcel(PhaseGuardMixin, models.Model):  # noqa: DJ008
+            status = PhaseField(max_length=10, transitions={})
+
+            class Meta:
+                app_label = "testapp"
+
+        self.assertEqual(
+            self.check(Parcel),
+            [("phase.W001", Parcel, "testapp.Parcel.objects doesn't refuse bulk writes to the phase field.")],
+        )
+
+    @isolate_apps("testapp")
+    def test_protected_managers(self):
+        class Parcel(PhaseGuardMixin, models.Model):  # noqa: DJ008
+            status = PhaseField(max_length=10, transitions={})
+
+            objects = PhaseManager()
+            open_parcels = OpenQuerySet.as_manager()
+
+            class Meta:
+                app_label = "testapp"
+
+        self.assertEqual(self.check(Parcel), [])
+
+    @isolate_apps("testapp")
+    def test_plain_manager_next_to_protected_one(self):
+        class Parcel(PhaseGuardMixin, models.Model):  # noqa: DJ008
+            status = PhaseField(max_length=10, transitions={})
+
+            objects = PhaseManager()
+            all_objects = models.Manager()  # noqa: DJ012
+
+            class Meta:
+                app_label = "testapp"
+
+        self.assertEqual(
+            self.check(Parcel),
+            [("phase.W001", Parcel, "testapp.Parcel.all_objects doesn't refuse bulk writes to the phase field.")],
+        )
+
+    @isolate_apps("testapp")
+    def test_manager_inherited_from_abstract_parent(self):
+        class AbstractParcel(PhaseGuardMixin, models.Model):
+            status = PhaseField(max_length=10, transitions={})
+
+            objects = models.Manager()
+
+            class Meta:
+                app_label = "testapp"
+                abstract = True
+
+        class Parcel(AbstractParcel):  # noqa: DJ008
+            class Meta:
+                app_label = "testapp"
+
+        self.assertEqual([warning[:2] for warning in self.check(Parcel)], [("phase.W001", Parcel)])
+
+    @isolate_apps("testapp")
+    def test_proxy_model_is_checked_for_its_own_managers(self):
+        class Parcel(PhaseGuardMixin, models.Model):  # noqa: DJ008
+            status = PhaseField(max_length=10, transitions={})
+
+            all_objects = models.Manager()
+
+            class Meta:
+                app_label = "testapp"
+
+        class ParcelProxy(Parcel):  # noqa: DJ008
+            class Meta:
+                app_label = "testapp"
+                proxy = True
+
+        class OpenParcelProxy(Parcel):  # noqa: DJ008
+            open_parcels = models.Manager()
+
+            class Meta:
+                app_label = "testapp"
+                proxy = True
+
+        self.assertEqual(
+            [warning[:2] for warning in self.check(Parcel, ParcelProxy, OpenParcelProxy)],
+            [("phase.W001", Parcel), ("phase.W001", OpenParcelProxy)],
+        )
+
+    @isolate_apps("testapp")
+    def test_model_without_phase_field(self):
+        class Parcel(models.Model):  # noqa: DJ008
+            status = models.CharField(max_length=10)
+
+            class Meta:
+                app_label = "testapp"
+
+        self.assertEqual(self.check(Parcel), [])

@@ -34,9 +34,11 @@ inserted with the phase given, **without a check against the transition table**:
 phase, including a final one. That is what an import of existing data needs, and it means the import is responsible
 for valid values.
 
-`bulk_create(update_conflicts=True, update_fields=[…])` with the phase field among `update_fields` overwrites the phase
-of existing rows without a transition and without the guard, like `QuerySet.update()`. Leave the phase field out of
-`update_fields` unless the import is meant to overwrite phases.
+`bulk_create(update_conflicts=True, update_fields=[…])` with the phase field among `update_fields` would overwrite the
+phase of existing rows without a transition and without the guard, like `QuerySet.update()`. A protected manager
+refuses it with `ProtectedPhaseFieldError`, see "Protected managers" in Usage. An import that is meant to overwrite
+phases goes through the plain base manager, `Order._base_manager.bulk_create(…)`, so the exception stays visible in
+review.
 
 ## `get_or_create()` and `update_or_create()`
 

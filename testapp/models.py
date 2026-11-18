@@ -1,6 +1,7 @@
 from django.db import models
 
 from phase.fields import IntegerPhaseField, PhaseField
+from phase.managers import PhaseManager
 from phase.mixins.phase_guard import PhaseGuardMixin
 
 
@@ -32,11 +33,13 @@ class Order(PhaseGuardMixin, models.Model):
     transition_count = models.PositiveIntegerField(default=0)
     updated_at = models.DateTimeField(auto_now=True)
 
+    objects = PhaseManager()
+
     def __str__(self) -> str:
         return f"Order {self.pk}: {self.status}"
 
 
-class ActiveShipmentManager(models.Manager):
+class ActiveShipmentManager(PhaseManager):
     def get_queryset(self) -> models.QuerySet:
         return super().get_queryset().filter(archived=False)
 
@@ -77,5 +80,22 @@ class Invoice(PhaseGuardMixin, models.Model):
         db_persist=True,
     )
 
+    objects = PhaseManager()
+
     def __str__(self) -> str:
         return f"Invoice {self.pk}: {self.status}"
+
+
+class Ticket(PhaseGuardMixin, models.Model):
+    """Protected default and base manager."""
+
+    status = PhaseField(max_length=10, default="new", transitions={"new": ("done",)})
+    note = models.CharField(max_length=100, blank=True, default="")
+
+    objects = PhaseManager()
+
+    class Meta:
+        base_manager_name = "objects"
+
+    def __str__(self) -> str:
+        return f"Ticket {self.pk}: {self.status}"

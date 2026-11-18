@@ -10,6 +10,7 @@ transition table; `phase.transitions.move()` and, for a whole queryset, `move_ma
 from django.db import models
 
 from phase.fields import PhaseField
+from phase.managers import PhaseManager
 from phase.mixins.phase_guard import PhaseGuardMixin
 
 
@@ -29,6 +30,8 @@ class Order(PhaseGuardMixin, models.Model):
             Status.PAID: (Status.SHIPPED,),
         },
     )
+
+    objects = PhaseManager()
 ```
 
 * A phase missing from `transitions` is final. Targets are tuples; a single target needs the trailing comma,
@@ -317,11 +320,64 @@ The lock taken by the `SELECT` lasts until the surrounding transaction ends, als
 Only the save of an existing instance with a loaded phase is guarded. An `INSERT` (`create()`, a new instance without a
 primary key, `force_insert=True`) and a save with empty `update_fields` cost nothing extra.
 
+## Protected managers
+
+`QuerySet.update()`, `bulk_update()` and `bulk_create(update_conflicts=True)` write the phase column without passing
+the field, so they would bypass the transition table and the guard. A manager built on `PhaseQuerySet` refuses them:
+
+```python
+from phase.managers import PhaseManager
+
+
+class Order(PhaseGuardMixin, models.Model):
+    status = PhaseField(...)
+
+    objects = PhaseManager()
+```
+
+* `update()` raises `ProtectedPhaseFieldError` when its keywords contain the phase field, `bulk_update()` when its
+  `fields` do, and `bulk_create(update_conflicts=True)` when its `update_fields` do. Writes of other fields pass, and
+  `bulk_create()` without `update_conflicts` inserts rows in any phase, see "Bulk creation and imports" in "Working with
+  other parts of Django".
+* Related managers (`customer.order_set.update(…)`) use the class of the default manager and are protected with it.
+* `move()`, `move_many()` and `force_move()` keep working, also when the model's base manager is protected
+  (`Meta.base_manager_name`): they let exactly their own `UPDATE` through.
+* `PhaseQuerySet.as_manager()` works as well. A project with querysets of its own (custom managers, packages such as
+  django-treebeard) puts `PhaseQuerySetMixin` in front of its queryset:
+
+```python
+from django.utils import timezone
+
+from phase.managers import PhaseQuerySetMixin
+
+
+class OrderQuerySet(PhaseQuerySetMixin, models.QuerySet):
+    def expired(self):
+        return self.filter(expires_at__lt=timezone.now())
+
+
+class Order(PhaseGuardMixin, models.Model):
+    objects = OrderQuerySet.as_manager()
+```
+
+* **Data migrations are unaffected.** `PhaseManager` isn't used in migrations (`use_in_migrations` is `False`), and
+  the historical model sees a plain `CharField`, so a data migration writes phases like any other column and has to
+  respect the table by hand.
+
+**System check `phase.W001`** warns about every manager of a phase model that isn't built on `PhaseQuerySetMixin`,
+including the automatic `objects` of a model that declares none and a plain second manager next to a protected one. A
+proxy model is checked for the managers it declares itself. The base manager isn't checked, because Django uses it
+internally; a model only declares it with `Meta.base_manager_name`. A project that deliberately allows bulk writes to
+the phase silences the warning with `SILENCED_SYSTEM_CHECKS = ["phase.W001"]`.
+
+When converting an existing model, protecting its managers turns every bulk write of the phase into an exception in the
+test suite. Replace each one with `move_many()` or, for repairs, `force_move()`.
+
 ## Limits
 
-* `QuerySet.update()` and `bulk_update()` bypass both the field and the mixin. Use `move_many()` for bulk transitions;
-  data migrations and other bulk writes have to respect the table by hand. So does
-  `bulk_create(update_conflicts=True)` with the phase among `update_fields`, see "Working with other parts of Django".
+* With a plain manager (`phase.W001` silenced), `QuerySet.update()`, `bulk_update()` and
+  `bulk_create(update_conflicts=True)` bypass both the field and the mixin. So does the plain base manager,
+  `Order._base_manager`, which isn't protected unless the model names a protected one in `Meta.base_manager_name`.
 * A model can have only one phase field, it can't be inherited from a concrete parent model, and it can't be
   nullable.
 * Phases are strings (`PhaseField`) or small positive integers (`IntegerPhaseField`). Other column types aren't

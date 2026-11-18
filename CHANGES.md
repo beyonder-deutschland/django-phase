@@ -7,6 +7,11 @@
   * `force_move()`: sets a phase outside the transition table for data repairs, with the same conditional `UPDATE` and
     signals as `move()`; `phase_moved` carries `forced=True` and the required `reason`, a stale instance raises
     `StalePhaseError`
+  * `PhaseManager`, `PhaseQuerySet` and `PhaseQuerySetMixin` refuse `update()`, `bulk_update()` and
+    `bulk_create(update_conflicts=True)` that write the phase field with `ProtectedPhaseFieldError`; transitions pass,
+    also through a protected base manager
+  * System check `phase.W001` warns about every manager of a phase model that isn't built on `PhaseQuerySetMixin`.
+    Existing phase models get this warning until their managers are protected or the check is silenced
   * `phase.contrib.rest_framework.exception_handler` answers `PhaseGuardError`, `IllegalPhaseTransitionError` and
     `StalePhaseError` in Django REST framework with HTTP 409 and `{"code": …, "detail": …}`; the extra `drf` installs
     `djangorestframework`

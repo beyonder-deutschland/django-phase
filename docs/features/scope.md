@@ -46,17 +46,6 @@ The transition table is a plain dict on the field and can be rendered by any too
 These are open on purpose. Each one is a trade-off that is better decided with experience from projects using the
 package than up front.
 
-### Protection against `QuerySet.update()` and `bulk_update()`
-
-Both write the phase column without passing the field, so they bypass the transition table and the guard. A queryset
-mixin could refuse any `update()` or `bulk_update()` that writes the phase field, so existing bypasses fail in the test
-suite instead of having to be found by review.
-
-Not included yet, because it only works where a project opts in on every manager of the model — many models bring
-their own managers and querysets — and because it changes how the package's own bulk writes have to reach the
-database. Until then, `move_many()` is the way to change the phase of many rows, and a review rule or lint check keeps
-`update(<phase>=…)` and `bulk_update(…, [<phase>])` out of the code.
-
 ### Admin integration
 
 The admin leaves the phase field out of its forms. Offering transitions there is a matter of the project's actions,
